@@ -1468,6 +1468,19 @@ function buildGpuScene(
 // 4. Arcball Interaction & GPU Color-ID MicroViewer
 // =========================================================================
 
+/** Binds one PBR texture slot using the same presence contract for every map. */
+function bindMaterialTexture(
+  gl: WebGL2RenderingContext, texture: WebGLTexture | null | undefined,
+  unit: number, sampler: WebGLUniformLocation | null, present: WebGLUniformLocation | null,
+): void {
+  if (texture) {
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.uniform1i(sampler, unit);
+  }
+  gl.uniform1i(present, texture ? 1 : 0);
+}
+
 export class ThreeView {
   public gl: WebGL2RenderingContext;
   public canvas: HTMLCanvasElement;
@@ -1583,14 +1596,7 @@ export class ThreeView {
     return getDecoder(type);
   }
 
-  private boundPointerDown: ((e: PointerEvent) => void) | null = null;
-  private boundPointerMove: ((e: PointerEvent) => void) | null = null;
-  private boundPointerUp: ((e: PointerEvent) => void) | null = null;
-  private boundWheel: ((e: WheelEvent) => void) | null = null;
-  private boundKeyDown: ((e: KeyboardEvent) => void) | null = null;
-  private boundContextMenu: ((e: MouseEvent) => void) | null = null;
-  private boundSetCamera: ((e: any) => void) | null = null;
-  private boundResetCamera: (() => void) | null = null;
+  private readonly eventListeners: Array<[EventTarget, string, EventListener]> = [];
 
   constructor(
     container: HTMLElement,
@@ -2679,15 +2685,22 @@ export class ThreeView {
     return this.selectedMeshName;
   }
 
+  private listen<T extends Event>(target: EventTarget, type: string,
+    listener: (event: T) => void, options?: AddEventListenerOptions): void {
+    const fn = listener as EventListener;
+    target.addEventListener(type, fn, options);
+    this.eventListeners.push([target, type, fn]);
+  }
+
   private setupEvents(): void {
     const c = this.canvas;
 
-    this.boundContextMenu = (e: MouseEvent) => {
+    const contextMenu = (e: MouseEvent) => {
       e.preventDefault();
     };
-    c.addEventListener('contextmenu', this.boundContextMenu);
+    this.listen(c, 'contextmenu', contextMenu);
 
-    this.boundPointerDown = (e: PointerEvent) => {
+    const pointerDown = (e: PointerEvent) => {
       if (!this.interactive) return;
       this.isPointerDown = true;
       this.lastInteractionTime =
@@ -2700,9 +2713,9 @@ export class ThreeView {
         e.button === 2 || e.shiftKey || this.activePointers.size === 2;
       c.setPointerCapture(e.pointerId);
     };
-    c.addEventListener('pointerdown', this.boundPointerDown);
+    this.listen(c, 'pointerdown', pointerDown);
 
-    this.boundPointerMove = (e: PointerEvent) => {
+    const pointerMove = (e: PointerEvent) => {
       if (!this.isPointerDown || !this.interactive) return;
       this.lastInteractionTime =
         typeof performance !== 'undefined' ? performance.now() : Date.now();
@@ -2743,9 +2756,9 @@ export class ThreeView {
         this.targetPhi = this.clampPhi(this.targetPhi + dy * 0.008);
       }
     };
-    c.addEventListener('pointermove', this.boundPointerMove);
+    this.listen(c, 'pointermove', pointerMove);
 
-    this.boundPointerUp = (e: PointerEvent) => {
+    const pointerUp = (e: PointerEvent) => {
       this.lastInteractionTime =
         typeof performance !== 'undefined' ? performance.now() : Date.now();
       this.activePointers.delete(e.pointerId);
@@ -2771,9 +2784,9 @@ export class ThreeView {
         this.performMeshPick(clickX, clickY, true);
       }
     };
-    c.addEventListener('pointerup', this.boundPointerUp);
+    this.listen(c, 'pointerup', pointerUp);
 
-    this.boundWheel = (e: WheelEvent) => {
+    const wheel = (e: WheelEvent) => {
       if (!this.interactive) return;
       e.preventDefault();
       this.lastInteractionTime =
@@ -2781,10 +2794,10 @@ export class ThreeView {
       const factor = Math.exp(e.deltaY * 0.001);
       this.targetDistance = this.clampDistance(this.targetDistance * factor);
     };
-    c.addEventListener('wheel', this.boundWheel, {passive: false});
+    this.listen(c, 'wheel', wheel, {passive: false});
 
     // Event-driven programmatic camera control
-    this.boundSetCamera = (e: any) => {
+    const setCamera = (e: any) => {
       const d = e.detail || {};
       if (d.reset) {
         this.resetCamera();
@@ -2792,12 +2805,12 @@ export class ThreeView {
         this.setCamera(d.theta, d.phi, d.distance, d.zoom);
       }
     };
-    this.container.addEventListener('setCamera', this.boundSetCamera);
+    this.listen(this.container, 'setCamera', setCamera);
 
-    this.boundResetCamera = () => {
+    const resetCamera = () => {
       this.resetCamera();
     };
-    this.container.addEventListener('resetCamera', this.boundResetCamera);
+    this.listen(this.container, 'resetCamera', resetCamera);
 
     // Keyboard navigation for accessibility (WCAG 2.1.1 Keyboard Accessible)
     if (c.tabIndex !== undefined && c.tabIndex < 0) {
@@ -2810,7 +2823,7 @@ export class ThreeView {
       c.setAttribute?.('aria-label', 'Interactive 3D model viewport');
     }
 
-    this.boundKeyDown = (e: KeyboardEvent) => {
+    const keyDown = (e: KeyboardEvent) => {
       if (!this.interactive) return;
       const now =
         typeof performance !== 'undefined' ? performance.now() : Date.now();
@@ -2856,42 +2869,12 @@ export class ThreeView {
           break;
       }
     };
-    c.addEventListener('keydown', this.boundKeyDown);
+    this.listen(c, 'keydown', keyDown);
   }
 
   private teardownEvents(): void {
-    const c = this.canvas;
-    if (this.boundContextMenu) {
-      c.removeEventListener('contextmenu', this.boundContextMenu);
-      this.boundContextMenu = null;
-    }
-    if (this.boundPointerDown) {
-      c.removeEventListener('pointerdown', this.boundPointerDown);
-      this.boundPointerDown = null;
-    }
-    if (this.boundPointerMove) {
-      c.removeEventListener('pointermove', this.boundPointerMove);
-      this.boundPointerMove = null;
-    }
-    if (this.boundPointerUp) {
-      c.removeEventListener('pointerup', this.boundPointerUp);
-      this.boundPointerUp = null;
-    }
-    if (this.boundWheel) {
-      c.removeEventListener('wheel', this.boundWheel);
-      this.boundWheel = null;
-    }
-    if (this.boundKeyDown) {
-      c.removeEventListener('keydown', this.boundKeyDown);
-      this.boundKeyDown = null;
-    }
-    if (this.boundSetCamera) {
-      this.container.removeEventListener('setCamera', this.boundSetCamera);
-      this.boundSetCamera = null;
-    }
-    if (this.boundResetCamera) {
-      this.container.removeEventListener('resetCamera', this.boundResetCamera);
-      this.boundResetCamera = null;
+    for (const [target, type, listener] of this.eventListeners.splice(0)) {
+      target.removeEventListener(type, listener);
     }
   }
 
@@ -3567,54 +3550,23 @@ export class ThreeView {
       const rightVecZ = -Math.sin(this.currTheta);
       const halfIpd = 0.032;
 
-      const leftProj = mat4Create();
-      const leftView = mat4Create();
-      const leftEye: [number, number, number] = [
-        baseEyeX - rightVecX * halfIpd,
-        baseEyeY,
-        baseEyeZ - rightVecZ * halfIpd,
-      ];
-      const leftTarget: [number, number, number] = [
-        c[0] - rightVecX * halfIpd * 0.25,
-        c[1],
-        c[2] - rightVecZ * halfIpd * 0.25,
-      ];
-      mat4Perspective(leftProj, this.fov, halfW / fullH, 0.1, farPlane);
-      mat4LookAt(leftView, leftEye, leftTarget, [0, 1, 0]);
-
-      const rightProj = mat4Create();
-      const rightView = mat4Create();
-      const rightEye: [number, number, number] = [
-        baseEyeX + rightVecX * halfIpd,
-        baseEyeY,
-        baseEyeZ + rightVecZ * halfIpd,
-      ];
-      const rightTarget: [number, number, number] = [
-        c[0] + rightVecX * halfIpd * 0.25,
-        c[1],
-        c[2] + rightVecZ * halfIpd * 0.25,
-      ];
-      mat4Perspective(rightProj, this.fov, rightW / fullH, 0.1, farPlane);
-      mat4LookAt(rightView, rightEye, rightTarget, [0, 1, 0]);
-
-      this.render({
-        viewMatrix: leftView,
-        projMatrix: leftProj,
-        eyePos: leftEye,
-        viewport: [0, 0, halfW, fullH],
-        eye: 'left',
-        clear: true,
-        isAR: false,
-      });
-      this.render({
-        viewMatrix: rightView,
-        projMatrix: rightProj,
-        eyePos: rightEye,
-        viewport: [halfW, 0, rightW, fullH],
-        eye: 'right',
-        clear: false,
-        isAR: false,
-      });
+      for (let i = 0; i < 2; i++) {
+        const left = i === 0;
+        const offset = left ? -halfIpd : halfIpd;
+        const width = left ? halfW : rightW;
+        const eye: [number, number, number] = [
+          baseEyeX + rightVecX * offset, baseEyeY, baseEyeZ + rightVecZ * offset,
+        ];
+        const target: [number, number, number] = [
+          c[0] + rightVecX * offset * 0.25, c[1], c[2] + rightVecZ * offset * 0.25,
+        ];
+        const projection = mat4Create(), view = mat4Create();
+        mat4Perspective(projection, this.fov, width / fullH, 0.1, farPlane);
+        mat4LookAt(view, eye, target, [0, 1, 0]);
+        this.render({viewMatrix: view, projMatrix: projection, eyePos: eye,
+          viewport: [left ? 0 : halfW, 0, width, fullH],
+          eye: left ? 'left' : 'right', clear: left, isAR: false});
+      }
       this.gl.viewport(0, 0, fullW, fullH);
       return;
     }
@@ -3799,43 +3751,12 @@ export class ThreeView {
             );
           }
 
-          if (prim.texture) {
-            gl.activeTexture(gl.TEXTURE0);
-            gl.bindTexture(gl.TEXTURE_2D, prim.texture);
-            gl.uniform1i(u.uBaseColorTexture, 0);
-            gl.uniform1i(u.uHasTexture, 1);
-          } else {
-            gl.uniform1i(u.uHasTexture, 0);
-          }
-
-          if (prim.metallicRoughnessTexture) {
-            gl.activeTexture(gl.TEXTURE1);
-            gl.bindTexture(gl.TEXTURE_2D, prim.metallicRoughnessTexture);
-            gl.uniform1i(u.uMetallicRoughnessTexture, 1);
-            gl.uniform1i(u.uHasMetallicRoughnessTexture, 1);
-          } else {
-            gl.uniform1i(u.uHasMetallicRoughnessTexture, 0);
-          }
-
-          if (prim.normalTexture) {
-            gl.activeTexture(gl.TEXTURE2);
-            gl.bindTexture(gl.TEXTURE_2D, prim.normalTexture);
-            gl.uniform1i(u.uNormalTexture, 2);
-            gl.uniform1i(u.uHasNormalTexture, 1);
-            gl.uniform1f(u.uNormalScale, prim.normalScale);
-          } else {
-            gl.uniform1i(u.uHasNormalTexture, 0);
-          }
-
-          if (prim.occlusionTexture) {
-            gl.activeTexture(gl.TEXTURE3);
-            gl.bindTexture(gl.TEXTURE_2D, prim.occlusionTexture);
-            gl.uniform1i(u.uOcclusionTexture, 3);
-            gl.uniform1i(u.uHasOcclusionTexture, 1);
-            gl.uniform1f(u.uOcclusionStrength, prim.occlusionStrength);
-          } else {
-            gl.uniform1i(u.uHasOcclusionTexture, 0);
-          }
+          bindMaterialTexture(gl, prim.texture, 0, u.uBaseColorTexture, u.uHasTexture);
+          bindMaterialTexture(gl, prim.metallicRoughnessTexture, 1, u.uMetallicRoughnessTexture, u.uHasMetallicRoughnessTexture);
+          bindMaterialTexture(gl, prim.normalTexture, 2, u.uNormalTexture, u.uHasNormalTexture);
+          if (prim.normalTexture) gl.uniform1f(u.uNormalScale, prim.normalScale);
+          bindMaterialTexture(gl, prim.occlusionTexture, 3, u.uOcclusionTexture, u.uHasOcclusionTexture);
+          if (prim.occlusionTexture) gl.uniform1f(u.uOcclusionStrength, prim.occlusionStrength);
 
           gl.bindVertexArray(prim.vao);
           const instMats = mesh.instanceMatrices;
