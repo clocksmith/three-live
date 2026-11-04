@@ -335,7 +335,8 @@ export function toGLBData(
 // =========================================================================
 
 const VS_RENDER = `#version 300 es
-layout(location=0) in vec3 aPosition;
+layout(location=0) in vec3 aPos;
+layout(location=3) in vec3 aOff;
 layout(location=1) in vec3 aNormal;
 layout(location=2) in vec2 aUV;
 uniform mat4 uMVP,uModel;
@@ -344,6 +345,7 @@ uniform vec4 uUvTransform;
 out vec3 vNormal,vWorldPos;
 out vec2 vUV;
 void main(){
+vec3 aPosition=aPos+aOff;
 vec3 rawN=uNormalMatrix*aNormal;
 vNormal=length(rawN)>1e-5?normalize(rawN):vec3(0.0);
 vec4 world=uModel*vec4(aPosition,1.0);
@@ -747,6 +749,7 @@ interface PrimitiveGpu {
   vao: WebGLVertexArrayObject;
   indexCount: number;
   indexType: number;
+  instanceCount?: number;
   baseColor: [number, number, number, number];
   metallic: number;
   roughness: number;
@@ -1469,6 +1472,7 @@ function buildGpuScene(
 // =========================================================================
 
 export class ThreeView {
+  readonly supportsInstanceOffsets = true;
   public gl: WebGL2RenderingContext;
   public canvas: HTMLCanvasElement;
   public container: HTMLElement;
@@ -3738,6 +3742,7 @@ export class ThreeView {
           const prog = prim.customProgram || this.renderProg;
           const u = prim.customUniforms || this.uRender;
           gl.useProgram(prog);
+          gl.vertexAttrib3f(3, 0, 0, 0);
 
           gl.uniform1i(u.uToneMapping, toneMode);
           gl.uniform1f(u.uEnvIntensity, this.envIntensity);
@@ -3839,7 +3844,9 @@ export class ThreeView {
 
           gl.bindVertexArray(prim.vao);
           const instMats = mesh.instanceMatrices;
-          if (instMats && instMats.length >= 16) {
+          if (prim.instanceCount !== undefined) {
+            gl.drawElementsInstanced(gl.TRIANGLES, prim.indexCount, prim.indexType, 0, prim.instanceCount);
+          } else if (instMats && instMats.length >= 16) {
             const instCount = instMats.length >> 4;
             const instColors = mesh.instanceColors;
             const instModel = mat4Create();
