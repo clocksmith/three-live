@@ -3897,7 +3897,8 @@ export class ThreeView {
     }
 
     for (const plugin of registeredPlugins) {
-      plugin.onAfterRender?.(gl, this, vp);
+      plugin.onAfterRender?.(gl, this, vp, xrOverride?.eye ?? 'none',
+        [vpX, vpY, vpW, vpH], xrOverride?.projMatrix ?? this.projMatrix);
     }
   }
 
