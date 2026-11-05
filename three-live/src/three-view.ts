@@ -158,6 +158,10 @@ export interface GLBData {
   bin: ArrayBuffer;
   lights?: LightGpu[];
   animations?: AnimationClip[];
+  /** False while raw clips await a plugin; true includes a parsed empty result.
+   * An animations array without this flag is caller-supplied, parsed data.
+   */
+  animationsParsed?: boolean;
   exposure?: number;
   environmentIntensity?: number;
 }
@@ -277,7 +281,7 @@ export function parseGLB(input: ArrayBuffer | ArrayBufferView): GLBData {
   const glbData: GLBData = {
     gltf: jsonChunk,
     bin,
-    animations: [],
+    animationsParsed: false,
   };
   for (const plugin of registeredPlugins) {
     plugin.onParseGLB?.(glbData);
@@ -1445,10 +1449,10 @@ function buildGpuScene(
   const minCoord: [number, number, number] = [min[0], min[1], min[2]];
   const maxCoord: [number, number, number] = [max[0], max[1], max[2]];
   let animations = data.animations;
-  if (!animations) {
+  if (data.animationsParsed === false || !animations) {
     for (const plugin of registeredPlugins) {
       plugin.onParseGLB?.(data);
-      if (data.animations) {
+      if (data.animationsParsed !== false && data.animations) {
         animations = data.animations;
         break;
       }
