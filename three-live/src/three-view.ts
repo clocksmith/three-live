@@ -158,6 +158,10 @@ export interface GLBData {
   bin: ArrayBuffer;
   lights?: LightGpu[];
   animations?: AnimationClip[];
+  /** False while raw clips await a plugin; true includes a parsed empty result.
+   * An animations array without this flag is caller-supplied, parsed data.
+   */
+  animationsParsed?: boolean;
   exposure?: number;
   environmentIntensity?: number;
 }
@@ -277,7 +281,7 @@ export function parseGLB(input: ArrayBuffer | ArrayBufferView): GLBData {
   const glbData: GLBData = {
     gltf: jsonChunk,
     bin,
-    animations: [],
+    animationsParsed: false,
   };
   for (const plugin of registeredPlugins) {
     plugin.onParseGLB?.(glbData);
@@ -782,6 +786,7 @@ interface MeshGpu {
   extras?: Record<string, any>;
   instanceMatrices?: Float32Array;
   instanceColors?: Float32Array;
+  __replacedFrom?: MeshGpu;
 }
 
 /**
@@ -888,6 +893,236 @@ const UNBOUNDED_HOST_SCENE_LIMITS: HostSceneLimits = Object.freeze({
   maxVertices: Infinity,
   maxIndices: Infinity,
 });
+
+export interface SceneBoundingBox {
+  center: [number, number, number];
+  radius: number;
+  min: [number, number, number];
+  max: [number, number, number];
+}
+
+export interface SceneEditConstraints {
+  /** Require candidate world-space height (Y extent) to match replaced target within relative tolerance (default 0.05). */
+  preserveHeight?: boolean | {tolerance?: number};
+  /** Require candidate world-space [X, Y, Z] extents to match replaced target within relative tolerance (default 0.1). */
+  preserveBounds?: boolean | {tolerance?: number};
+  /** Require candidate world-space horizontal [X, Z] footprint to match replaced target within relative tolerance (default 0.1). */
+  preserveFootprint?: boolean | {tolerance?: number};
+  /** Maximum allowed world-space [X, Y, Z] dimensions for the replacement. */
+  maxBounds?: [number, number, number];
+  /** Require candidate material properties/textures to match the named scene mesh/node. */
+  matchMaterialOf?: string;
+}
+
+export interface SceneConstraintCheck {
+  name:
+    | 'preserveHeight'
+    | 'preserveBounds'
+    | 'preserveFootprint'
+    | 'maxBounds'
+    | 'matchMaterialOf';
+  passed: boolean;
+  expected: string;
+  actual: string;
+  tolerance?: number;
+  message?: string;
+}
+
+export interface SceneEditOptions {
+  /** Target mesh or glTF node name(s) in the active scene to replace. */
+  target: string | string[];
+  /** Replacement scene data (GLBData or binary GLB buffer). */
+  replacement: GLBData | ArrayBuffer | ArrayBufferView;
+  /** Optional mesh/node name(s) within `replacement` to extract; defaults to all meshes in `replacement`. */
+  replacementTarget?: string | string[];
+  /** Allow matching multiple meshes/nodes with the same duplicate name (defaults to false, failing closed on ambiguity). */
+  allowDuplicateTargets?: boolean;
+  /** Inherit world transform from the replaced target mesh/node (defaults to true). */
+  preserveTransform?: boolean;
+  /** Preserve the target mesh name on a 1-to-1 replacement so selection and follow-up edits address the same name (defaults to true). */
+  preserveTargetName?: boolean;
+  /** Copy PBR material factors and shared GPU texture handles from an existing mesh/node in the active scene. */
+  copyMaterialFrom?: string;
+  /** Geometric and material constraints to validate before staging the preview. */
+  constraints?: SceneEditConstraints;
+  /** Reject and dispose the candidate automatically when any constraint check fails (defaults to true). */
+  rejectOnConstraintViolation?: boolean;
+  /** Optional host scene limits for untrusted replacement payloads. */
+  limits?: HostSceneLimits;
+  /** Optional diagnostic warnings (e.g. from sandbox worker compilation) to attach to the receipt. */
+  warnings?: string[];
+}
+
+export interface SceneEditReceipt {
+  editId: number;
+  revision: number;
+  status: 'preview' | 'accepted' | 'rejected' | 'undone';
+  applied: boolean;
+  targets: string[];
+  replacedMeshNames: string[];
+  replacementMeshNames: string[];
+  previousBounds: SceneBoundingBox | null;
+  candidateBounds: SceneBoundingBox | null;
+  constraints: SceneConstraintCheck[];
+  warnings: string[];
+  errors: string[];
+  undoDepth: number;
+}
+
+function applyGltfMaterialToPrimitive(
+  prim: Partial<PrimitiveGpu>,
+  mat: any,
+  gpuTextures: Array<WebGLTexture | null>,
+  pluginData?: Record<string, any>,
+): void {
+  const pbr = mat?.pbrMetallicRoughness;
+  const bc = pbr?.baseColorFactor;
+  prim.baseColor = bc
+    ? [bc[0], bc[1], bc[2], bc[3] ?? 1.0]
+    : [0.8, 0.8, 0.8, 1.0];
+  prim.metallic = pbr?.metallicFactor ?? 0.1;
+  prim.roughness = pbr?.roughnessFactor ?? 0.5;
+  const ccExt = mat?.extensions?.KHR_materials_clearcoat;
+  prim.clearcoat = ccExt ? (ccExt.clearcoatFactor ?? 1.0) : 0.0;
+  prim.clearcoatRoughness = Math.max(
+    0.04,
+    ccExt?.clearcoatRoughnessFactor ?? 0.04,
+  );
+  const texAt = (info: any) =>
+    info !== undefined && gpuTextures[info.index]
+      ? gpuTextures[info.index]
+      : null;
+  prim.texture = texAt(pbr?.baseColorTexture);
+  prim.metallicRoughnessTexture = texAt(pbr?.metallicRoughnessTexture);
+  prim.normalTexture = texAt(mat?.normalTexture);
+  prim.normalScale = mat?.normalTexture?.scale ?? 1.0;
+  prim.occlusionTexture = texAt(mat?.occlusionTexture);
+  prim.occlusionStrength = mat?.occlusionTexture?.strength ?? 1.0;
+  prim.isTransmissive = Boolean(
+    mat?.extensions?.KHR_materials_transmission ||
+      (pluginData ?? prim.pluginData)?.materials?.isTransmissive,
+  );
+}
+
+function disposeMeshHandles(
+  gl: WebGL2RenderingContext,
+  list: MeshGpu[],
+  extraTextures?: Array<WebGLTexture | null>,
+  keepHandles?: Set<unknown>,
+): void {
+  const deleted = new Set<unknown>();
+  const canDelete = (h: unknown): boolean => {
+    if (!h || deleted.has(h) || keepHandles?.has(h)) return false;
+    deleted.add(h);
+    return true;
+  };
+  for (const mesh of list) {
+    for (const prim of mesh.primitives) {
+      if (canDelete(prim.vao)) gl.deleteVertexArray(prim.vao);
+      if (prim.buffers) {
+        for (const buf of prim.buffers) {
+          if (canDelete(buf)) gl.deleteBuffer(buf);
+        }
+      }
+      if (canDelete(prim.texture)) gl.deleteTexture(prim.texture);
+      if (canDelete(prim.metallicRoughnessTexture)) {
+        gl.deleteTexture(prim.metallicRoughnessTexture);
+      }
+      if (canDelete(prim.normalTexture)) gl.deleteTexture(prim.normalTexture);
+      if (canDelete(prim.occlusionTexture)) {
+        gl.deleteTexture(prim.occlusionTexture);
+      }
+      if (canDelete(prim.customProgram)) {
+        gl.deleteProgram(prim.customProgram!);
+      }
+    }
+  }
+  if (extraTextures) {
+    for (const tex of extraTextures) {
+      if (canDelete(tex)) gl.deleteTexture(tex);
+    }
+  }
+}
+
+function expandWorldBoundsFromLocalBox(
+  mat: Float32Array,
+  lMin: [number, number, number] | number[],
+  lMax: [number, number, number] | number[],
+  min: number[],
+  max: number[],
+): void {
+  for (let c = 0; c < 3; c++) {
+    let wMin = mat[12 + c];
+    let wMax = mat[12 + c];
+    for (let j = 0; j < 3; j++) {
+      const a = mat[j * 4 + c] * lMin[j];
+      const b = mat[j * 4 + c] * lMax[j];
+      wMin += a < b ? a : b;
+      wMax += a > b ? a : b;
+    }
+    if (wMin < min[c]) min[c] = wMin;
+    if (wMax > max[c]) max[c] = wMax;
+  }
+}
+
+function finalizeBoundsFromMinMax(min: number[], max: number[]): SceneBoundingBox {
+  if (!isFinite(min[0])) min = [-1, -1, -1];
+  if (!isFinite(max[0])) max = [1, 1, 1];
+  const center: [number, number, number] = [
+    (min[0] + max[0]) / 2,
+    (min[1] + max[1]) / 2,
+    (min[2] + max[2]) / 2,
+  ];
+  const dx = max[0] - min[0];
+  const dy = max[1] - min[1];
+  const dz = max[2] - min[2];
+  const radius = Math.max(Math.hypot(dx, dy, dz) / 2, 0.5);
+  return {
+    center,
+    radius,
+    min: [min[0], min[1], min[2]],
+    max: [max[0], max[1], max[2]],
+  };
+}
+
+function computeMeshListBounds(meshes: MeshGpu[]): SceneBoundingBox {
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (const mesh of meshes) {
+    for (const prim of mesh.primitives) {
+      const pos = prim.positions;
+      if (!pos || pos.length < 3) continue;
+      const lMin: [number, number, number] = [Infinity, Infinity, Infinity];
+      const lMax: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+      for (let i = 0; i < pos.length; i += 3) {
+        const x = pos[i];
+        const y = pos[i + 1];
+        const z = pos[i + 2];
+        if (x < lMin[0]) lMin[0] = x;
+        if (y < lMin[1]) lMin[1] = y;
+        if (z < lMin[2]) lMin[2] = z;
+        if (x > lMax[0]) lMax[0] = x;
+        if (y > lMax[1]) lMax[1] = y;
+        if (z > lMax[2]) lMax[2] = z;
+      }
+      if (mesh.instanceMatrices && mesh.instanceMatrices.length >= 16) {
+        const instCount = mesh.instanceMatrices.length >> 4;
+        const instWorld = mat4Create();
+        for (let inst = 0; inst < instCount; inst++) {
+          const instMat = mesh.instanceMatrices.subarray(
+            inst * 16,
+            inst * 16 + 16,
+          );
+          mat4Multiply(instWorld, mesh.transform, instMat);
+          expandWorldBoundsFromLocalBox(instWorld, lMin, lMax, min, max);
+        }
+      } else {
+        expandWorldBoundsFromLocalBox(mesh.transform, lMin, lMax, min, max);
+      }
+    }
+  }
+  return finalizeBoundsFromMinMax(min, max);
+}
 
 function buildGpuScene(
   gl: WebGL2RenderingContext,
@@ -1087,368 +1322,357 @@ function buildGpuScene(
     }
   }
 
-  let min = [Infinity, Infinity, Infinity];
-  let max = [-Infinity, -Infinity, -Infinity];
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
   let totalHostVertices = 0;
   let totalHostIndices = 0;
 
-  for (let i = 0; i < itemsToBuild.length; i++) {
-    const item = itemsToBuild[i];
-    const m = gltf.meshes[item.meshIdx];
-    const trans =
-      item.nodeIdx >= 0 ? nodeWorldMatrices[item.nodeIdx] : mat4Create();
-    const normMat = new Float32Array(9);
-    mat3NormalFromMat4(normMat, trans);
-    const meshGpu: MeshGpu = {
-      name: item.node.name || m.name || `Mesh_${item.meshIdx}`,
-      nodeIndex: item.nodeIdx,
-      transform: trans,
-      normalMatrix: normMat,
-      primitives: [],
-      extras: item.node.extras || m.extras,
-    };
+  try {
+    for (let i = 0; i < itemsToBuild.length; i++) {
+      const item = itemsToBuild[i];
+      const m = gltf.meshes[item.meshIdx];
+      const trans =
+        item.nodeIdx >= 0 ? nodeWorldMatrices[item.nodeIdx] : mat4Create();
+      const normMat = new Float32Array(9);
+      mat3NormalFromMat4(normMat, trans);
+      const meshGpu: MeshGpu = {
+        name: item.node.name || m.name || `Mesh_${item.meshIdx}`,
+        nodeIndex: item.nodeIdx,
+        transform: trans,
+        normalMatrix: normMat,
+        primitives: [],
+        extras: item.node.extras || m.extras,
+      };
+      meshes.push(meshGpu);
 
-    const instExt = item.node?.extensions?.EXT_mesh_gpu_instancing;
-    if (
-      instExt &&
-      instExt.attributes &&
-      typeof instExt.attributes === 'object'
-    ) {
-      const attrs = instExt.attributes;
-      const tAcc =
-        attrs.TRANSLATION !== undefined
-          ? gltf.accessors?.[attrs.TRANSLATION]
-          : null;
-      const rAcc =
-        attrs.ROTATION !== undefined ? gltf.accessors?.[attrs.ROTATION] : null;
-      const sAcc =
-        attrs.SCALE !== undefined ? gltf.accessors?.[attrs.SCALE] : null;
-      const cAcc =
-        attrs._COLOR_0 !== undefined ? gltf.accessors?.[attrs._COLOR_0] : null;
-      const rawInstCount = Number(
-        tAcc?.count ?? rAcc?.count ?? sAcc?.count ?? 0,
-      );
+      const instExt = item.node?.extensions?.EXT_mesh_gpu_instancing;
       if (
-        !Number.isFinite(rawInstCount) ||
-        rawInstCount < 0 ||
-        rawInstCount > 10000
+        instExt &&
+        instExt.attributes &&
+        typeof instExt.attributes === 'object'
       ) {
-        throw new Error(
-          `SecurityError: EXT_mesh_gpu_instancing exceeds maximum instance limit (10000). Found: ${rawInstCount}`,
+        const attrs = instExt.attributes;
+        const tAcc =
+          attrs.TRANSLATION !== undefined
+            ? gltf.accessors?.[attrs.TRANSLATION]
+            : null;
+        const rAcc =
+          attrs.ROTATION !== undefined ? gltf.accessors?.[attrs.ROTATION] : null;
+        const sAcc =
+          attrs.SCALE !== undefined ? gltf.accessors?.[attrs.SCALE] : null;
+        const cAcc =
+          attrs._COLOR_0 !== undefined ? gltf.accessors?.[attrs._COLOR_0] : null;
+        const rawInstCount = Number(
+          tAcc?.count ?? rAcc?.count ?? sAcc?.count ?? 0,
         );
-      }
-      if (rawInstCount > 0) {
-        const readAccFloats = (
-          acc:
-            | {bufferView?: number; byteOffset?: number; type?: string}
-            | null
-            | undefined,
-          comps: number,
-        ): Float32Array | null => {
-          if (
-            !acc ||
-            acc.bufferView === undefined ||
-            !gltf.bufferViews?.[acc.bufferView]
-          ) {
-            return null;
-          }
-          const bv = gltf.bufferViews[acc.bufferView];
-          const offset = (bv.byteOffset || 0) + (acc.byteOffset || 0);
-          return readFloat32Array(bin, offset, rawInstCount * comps);
-        };
-        const tData = readAccFloats(tAcc, 3);
-        const rData = readAccFloats(rAcc, 4);
-        const sData = readAccFloats(sAcc, 3);
-        const cComps = cAcc?.type === 'VEC4' ? 4 : 3;
-        const cData = readAccFloats(cAcc, cComps);
-        const instMatrices = new Float32Array(rawInstCount * 16);
-        const tmpMat = mat4Create();
-        for (let inst = 0; inst < rawInstCount; inst++) {
-          const t: [number, number, number] = tData
-            ? [tData[inst * 3], tData[inst * 3 + 1], tData[inst * 3 + 2]]
-            : [0, 0, 0];
-          const r: [number, number, number, number] = rData
-            ? [
-                rData[inst * 4],
-                rData[inst * 4 + 1],
-                rData[inst * 4 + 2],
-                rData[inst * 4 + 3],
-              ]
-            : [0, 0, 0, 1];
-          const s: [number, number, number] = sData
-            ? [sData[inst * 3], sData[inst * 3 + 1], sData[inst * 3 + 2]]
-            : [1, 1, 1];
-          mat4FromRotationTranslationScale(tmpMat, r, t, s);
-          instMatrices.set(tmpMat, inst * 16);
-        }
-        meshGpu.instanceMatrices = instMatrices;
-        if (cData) {
-          const instColors = new Float32Array(rawInstCount * 3);
-          for (let inst = 0; inst < rawInstCount; inst++) {
-            instColors[inst * 3] = cData[inst * cComps];
-            instColors[inst * 3 + 1] = cData[inst * cComps + 1];
-            instColors[inst * 3 + 2] = cData[inst * cComps + 2];
-          }
-          meshGpu.instanceColors = instColors;
-        }
-      }
-    }
-
-    for (const prim of m.primitives || []) {
-      if (prim.extensions?.KHR_draco_mesh_compression) {
-        const decoder = getDecoder('draco');
-        if (decoder) {
-          decoder.decodePrimitive(gltf, prim, bin);
-        }
-      }
-      const buffers: WebGLBuffer[] = [];
-      const vao = gl.createVertexArray()!;
-      gl.bindVertexArray(vao);
-
-      // 1. POSITION (required)
-      const posAcc = gltf.accessors[prim.attributes.POSITION];
-      const primVertCount = Number(posAcc?.count ?? 0);
-      if (
-        !Number.isFinite(primVertCount) ||
-        primVertCount < 0 ||
-        totalHostVertices + primVertCount > limits.maxVertices
-      ) {
-        throw new Error(
-          `SecurityError: GLB scene exceeds host vertex limit (${limits.maxVertices}).`,
-        );
-      }
-      totalHostVertices += primVertCount;
-      if (posAcc?.min && posAcc?.max) {
-        const expandBounds = (mat: Float32Array) => {
-          for (let c = 0; c < 3; c++) {
-            let wMin = mat[12 + c];
-            let wMax = mat[12 + c];
-            for (let j = 0; j < 3; j++) {
-              const a = mat[j * 4 + c] * posAcc.min[j];
-              const b = mat[j * 4 + c] * posAcc.max[j];
-              wMin += a < b ? a : b;
-              wMax += a > b ? a : b;
-            }
-            if (wMin < min[c]) min[c] = wMin;
-            if (wMax > max[c]) max[c] = wMax;
-          }
-        };
-        if (meshGpu.instanceMatrices && meshGpu.instanceMatrices.length >= 16) {
-          const instCount = meshGpu.instanceMatrices.length >> 4;
-          const instWorld = mat4Create();
-          for (let inst = 0; inst < instCount; inst++) {
-            const instMat = meshGpu.instanceMatrices.subarray(
-              inst * 16,
-              inst * 16 + 16,
-            );
-            mat4Multiply(instWorld, trans, instMat);
-            expandBounds(instWorld);
-          }
-        } else {
-          expandBounds(trans);
-        }
-      }
-      const posData = bindBufferAttribute(
-        gl,
-        gltf,
-        bin,
-        prim.attributes.POSITION,
-        0,
-        3,
-        buffers,
-      )!;
-
-      // 2. NORMAL & TEXCOORD_0 (optional)
-      bindBufferAttribute(gl, gltf, bin, prim.attributes.NORMAL, 1, 3, buffers);
-      bindBufferAttribute(
-        gl,
-        gltf,
-        bin,
-        prim.attributes.TEXCOORD_0,
-        2,
-        2,
-        buffers,
-      );
-
-      // 3. INDICES
-      let indexCount = 0;
-      let indexType = gl.UNSIGNED_SHORT;
-      let idxDataRaw: Uint16Array | Uint32Array | null = null;
-      if (prim.indices !== undefined) {
-        const idxAcc = gltf.accessors[prim.indices];
-        const idxBv = gltf.bufferViews[idxAcc.bufferView];
-        const idxOffset = (idxBv.byteOffset || 0) + (idxAcc.byteOffset || 0);
-        indexCount = Number(idxAcc.count ?? 0);
         if (
-          !Number.isFinite(indexCount) ||
-          indexCount < 0 ||
-          totalHostIndices + indexCount > limits.maxIndices
+          !Number.isFinite(rawInstCount) ||
+          rawInstCount < 0 ||
+          rawInstCount > 10000
         ) {
           throw new Error(
-            `SecurityError: GLB scene exceeds host index limit (${limits.maxIndices}).`,
+            `SecurityError: EXT_mesh_gpu_instancing exceeds maximum instance limit (10000). Found: ${rawInstCount}`,
           );
         }
-        totalHostIndices += indexCount;
-        indexType =
-          idxAcc.componentType === 5125
-            ? gl.UNSIGNED_INT || 5125
-            : gl.UNSIGNED_SHORT || 5123;
-
-        const ibo = gl.createBuffer()!;
-        buffers.push(ibo);
-        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
-        if (idxAcc.componentType === 5125) {
-          idxDataRaw = new Uint32Array(bin, idxOffset, idxAcc.count);
-          gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idxDataRaw, gl.STATIC_DRAW);
-        } else {
-          idxDataRaw = new Uint16Array(bin, idxOffset, idxAcc.count);
-          gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idxDataRaw, gl.STATIC_DRAW);
-        }
-      } else {
-        indexCount = posAcc.count;
-      }
-
-      const pluginData: Record<string, any> = {};
-      for (const plugin of registeredPlugins) {
-        if (plugin.onBuildPrimitiveVAO) {
-          const res = plugin.onBuildPrimitiveVAO(gl, vao, prim, gltf, bin);
-          if (res) pluginData[plugin.name] = res;
-        }
-      }
-
-      gl.bindVertexArray(null);
-
-      // 4. MATERIAL
-      const mat =
-        gltf.materials && prim.material !== undefined
-          ? gltf.materials[prim.material]
-          : null;
-
-      const spec = renderShaderSpec();
-      let vsSource = VS_RENDER;
-      let fsSource = spec.fs;
-      let hasCustomShader = false;
-      for (const plugin of registeredPlugins) {
-        if (plugin.onResolveShader) {
-          const shaders = plugin.onResolveShader(prim, mat, vsSource, fsSource);
-          if (shaders) {
-            vsSource = shaders.vs;
-            fsSource = shaders.fs;
-            hasCustomShader = true;
+        if (rawInstCount > 0) {
+          const readAccFloats = (
+            acc:
+              | {bufferView?: number; byteOffset?: number; type?: string}
+              | null
+              | undefined,
+            comps: number,
+          ): Float32Array | null => {
+            if (
+              !acc ||
+              acc.bufferView === undefined ||
+              !gltf.bufferViews?.[acc.bufferView]
+            ) {
+              return null;
+            }
+            const bv = gltf.bufferViews[acc.bufferView];
+            const offset = (bv.byteOffset || 0) + (acc.byteOffset || 0);
+            return readFloat32Array(bin, offset, rawInstCount * comps);
+          };
+          const tData = readAccFloats(tAcc, 3);
+          const rData = readAccFloats(rAcc, 4);
+          const sData = readAccFloats(sAcc, 3);
+          const cComps = cAcc?.type === 'VEC4' ? 4 : 3;
+          const cData = readAccFloats(cAcc, cComps);
+          const instMatrices = new Float32Array(rawInstCount * 16);
+          const tmpMat = mat4Create();
+          for (let inst = 0; inst < rawInstCount; inst++) {
+            const t: [number, number, number] = tData
+              ? [tData[inst * 3], tData[inst * 3 + 1], tData[inst * 3 + 2]]
+              : [0, 0, 0];
+            const r: [number, number, number, number] = rData
+              ? [
+                  rData[inst * 4],
+                  rData[inst * 4 + 1],
+                  rData[inst * 4 + 2],
+                  rData[inst * 4 + 3],
+                ]
+              : [0, 0, 0, 1];
+            const s: [number, number, number] = sData
+              ? [sData[inst * 3], sData[inst * 3 + 1], sData[inst * 3 + 2]]
+              : [1, 1, 1];
+            mat4FromRotationTranslationScale(tmpMat, r, t, s);
+            instMatrices.set(tmpMat, inst * 16);
+          }
+          meshGpu.instanceMatrices = instMatrices;
+          if (cData) {
+            const instColors = new Float32Array(rawInstCount * 3);
+            for (let inst = 0; inst < rawInstCount; inst++) {
+              instColors[inst * 3] = cData[inst * cComps];
+              instColors[inst * 3 + 1] = cData[inst * cComps + 1];
+              instColors[inst * 3 + 2] = cData[inst * cComps + 2];
+            }
+            meshGpu.instanceColors = instColors;
           }
         }
       }
-      const customProgram = hasCustomShader
-        ? createProgram(gl, vsSource, fsSource)
-        : null;
-      const customUniforms = customProgram
-        ? getUniforms(gl, customProgram, spec.uniforms)
-        : null;
 
-      const pbr = mat?.pbrMetallicRoughness;
-      const baseColor: [number, number, number, number] =
-        pbr?.baseColorFactor || [0.8, 0.8, 0.8, 1.0];
-      const metallic = pbr?.metallicFactor ?? 0.1;
-      const roughness = pbr?.roughnessFactor ?? 0.5;
-      const ccExt = mat?.extensions?.KHR_materials_clearcoat;
-      const clearcoat = ccExt ? (ccExt.clearcoatFactor ?? 1.0) : 0.0;
-      const clearcoatRoughness = Math.max(
-        0.04,
-        ccExt?.clearcoatRoughnessFactor ?? 0.04,
-      );
-      const texture =
-        pbr?.baseColorTexture !== undefined &&
-        gpuTextures[pbr.baseColorTexture.index]
-          ? gpuTextures[pbr.baseColorTexture.index]
-          : null;
-      const metallicRoughnessTexture =
-        pbr?.metallicRoughnessTexture !== undefined &&
-        gpuTextures[pbr.metallicRoughnessTexture.index]
-          ? gpuTextures[pbr.metallicRoughnessTexture.index]
-          : null;
-      const normalTexture =
-        mat?.normalTexture !== undefined && gpuTextures[mat.normalTexture.index]
-          ? gpuTextures[mat.normalTexture.index]
-          : null;
-      const normalScale = mat?.normalTexture?.scale ?? 1.0;
-      const occlusionTexture =
-        mat?.occlusionTexture !== undefined &&
-        gpuTextures[mat.occlusionTexture.index]
-          ? gpuTextures[mat.occlusionTexture.index]
-          : null;
-      const occlusionStrength = mat?.occlusionTexture?.strength ?? 1.0;
+      for (const prim of m.primitives || []) {
+        if (prim.extensions?.KHR_draco_mesh_compression) {
+          const decoder = getDecoder('draco');
+          if (decoder) {
+            decoder.decodePrimitive(gltf, prim, bin);
+          }
+        }
+        const posAcc = gltf.accessors[prim.attributes.POSITION];
+        const primVertCount = Number(posAcc?.count ?? 0);
+        if (
+          !Number.isFinite(primVertCount) ||
+          primVertCount < 0 ||
+          totalHostVertices + primVertCount > limits.maxVertices
+        ) {
+          throw new Error(
+            `SecurityError: GLB scene exceeds host vertex limit (${limits.maxVertices}).`,
+          );
+        }
+        totalHostVertices += primVertCount;
 
-      const isTransmissive = Boolean(
-        mat?.extensions?.KHR_materials_transmission ||
-          pluginData.materials?.isTransmissive,
-      );
+        const buffers: WebGLBuffer[] = [];
+        const vao = gl.createVertexArray()!;
+        gl.bindVertexArray(vao);
 
-      const rawMappings = prim.extensions?.KHR_materials_variants?.mappings;
-      const variantMappings:
-        | Array<{material: number; variants: number[]}>
-        | undefined = Array.isArray(rawMappings)
-        ? (rawMappings as Array<Record<string, unknown>>)
-            .filter(
-              (mp) =>
-                mp &&
-                typeof mp.material === 'number' &&
-                Array.isArray(mp.variants),
-            )
-            .map((mp) => ({
-              material: (mp.material as number) | 0,
-              variants: (mp.variants as unknown[]).map((v) => Number(v) | 0),
-            }))
-        : undefined;
+        try {
+          if (posAcc?.min && posAcc?.max) {
+            if (
+              meshGpu.instanceMatrices &&
+              meshGpu.instanceMatrices.length >= 16
+            ) {
+              const instCount = meshGpu.instanceMatrices.length >> 4;
+              const instWorld = mat4Create();
+              for (let inst = 0; inst < instCount; inst++) {
+                const instMat = meshGpu.instanceMatrices.subarray(
+                  inst * 16,
+                  inst * 16 + 16,
+                );
+                mat4Multiply(instWorld, trans, instMat);
+                expandWorldBoundsFromLocalBox(
+                  instWorld,
+                  posAcc.min,
+                  posAcc.max,
+                  min,
+                  max,
+                );
+              }
+            } else {
+              expandWorldBoundsFromLocalBox(
+                trans,
+                posAcc.min,
+                posAcc.max,
+                min,
+                max,
+              );
+            }
+          }
+          const posData = bindBufferAttribute(
+            gl,
+            gltf,
+            bin,
+            prim.attributes.POSITION,
+            0,
+            3,
+            buffers,
+          )!;
 
-      meshGpu.primitives.push({
-        vao,
-        indexCount,
-        indexType,
-        baseColor,
-        metallic,
-        roughness,
-        clearcoat,
-        clearcoatRoughness,
-        positions: posData,
-        indices: idxDataRaw,
-        texture,
-        metallicRoughnessTexture,
-        normalTexture,
-        occlusionTexture,
-        normalScale,
-        occlusionStrength,
-        buffers,
-        materialIndex: prim.material,
-        defaultMaterialIndex: prim.material,
-        variantMappings,
-        pluginData,
-        customProgram,
-        customUniforms,
-        isTransmissive,
-      });
+          // 2. NORMAL & TEXCOORD_0 (optional)
+          bindBufferAttribute(
+            gl,
+            gltf,
+            bin,
+            prim.attributes.NORMAL,
+            1,
+            3,
+            buffers,
+          );
+          bindBufferAttribute(
+            gl,
+            gltf,
+            bin,
+            prim.attributes.TEXCOORD_0,
+            2,
+            2,
+            buffers,
+          );
+
+          // 3. INDICES
+          let indexCount = 0;
+          let indexType = gl.UNSIGNED_SHORT;
+          let idxDataRaw: Uint16Array | Uint32Array | null = null;
+          if (prim.indices !== undefined) {
+            const idxAcc = gltf.accessors[prim.indices];
+            const idxBv = gltf.bufferViews[idxAcc.bufferView];
+            const idxOffset = (idxBv.byteOffset || 0) + (idxAcc.byteOffset || 0);
+            indexCount = Number(idxAcc.count ?? 0);
+            if (
+              !Number.isFinite(indexCount) ||
+              indexCount < 0 ||
+              totalHostIndices + indexCount > limits.maxIndices
+            ) {
+              throw new Error(
+                `SecurityError: GLB scene exceeds host index limit (${limits.maxIndices}).`,
+              );
+            }
+            totalHostIndices += indexCount;
+            indexType =
+              idxAcc.componentType === 5125
+                ? gl.UNSIGNED_INT || 5125
+                : gl.UNSIGNED_SHORT || 5123;
+
+            const ibo = gl.createBuffer()!;
+            buffers.push(ibo);
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+            if (idxAcc.componentType === 5125) {
+              idxDataRaw = new Uint32Array(bin, idxOffset, idxAcc.count);
+              gl.bufferData(
+                gl.ELEMENT_ARRAY_BUFFER,
+                idxDataRaw,
+                gl.STATIC_DRAW,
+              );
+            } else {
+              idxDataRaw = new Uint16Array(bin, idxOffset, idxAcc.count);
+              gl.bufferData(
+                gl.ELEMENT_ARRAY_BUFFER,
+                idxDataRaw,
+                gl.STATIC_DRAW,
+              );
+            }
+          } else {
+            indexCount = posAcc.count;
+          }
+
+          const pluginData: Record<string, any> = {};
+          for (const plugin of registeredPlugins) {
+            if (plugin.onBuildPrimitiveVAO) {
+              const res = plugin.onBuildPrimitiveVAO(gl, vao, prim, gltf, bin);
+              if (res) pluginData[plugin.name] = res;
+            }
+          }
+
+          gl.bindVertexArray(null);
+
+          // 4. MATERIAL
+          const mat =
+            gltf.materials && prim.material !== undefined
+              ? gltf.materials[prim.material]
+              : null;
+
+          const spec = renderShaderSpec();
+          let vsSource = VS_RENDER;
+          let fsSource = spec.fs;
+          let hasCustomShader = false;
+          for (const plugin of registeredPlugins) {
+            if (plugin.onResolveShader) {
+              const shaders = plugin.onResolveShader(
+                prim,
+                mat,
+                vsSource,
+                fsSource,
+              );
+              if (shaders) {
+                vsSource = shaders.vs;
+                fsSource = shaders.fs;
+                hasCustomShader = true;
+              }
+            }
+          }
+          const customProgram = hasCustomShader
+            ? createProgram(gl, vsSource, fsSource)
+            : null;
+          const customUniforms = customProgram
+            ? getUniforms(gl, customProgram, spec.uniforms)
+            : null;
+
+          const rawMappings = prim.extensions?.KHR_materials_variants?.mappings;
+          const variantMappings:
+            | Array<{material: number; variants: number[]}>
+            | undefined = Array.isArray(rawMappings)
+            ? (rawMappings as Array<Record<string, unknown>>)
+                .filter(
+                  (mp) =>
+                    mp &&
+                    typeof mp.material === 'number' &&
+                    Array.isArray(mp.variants),
+                )
+                .map((mp) => ({
+                  material: (mp.material as number) | 0,
+                  variants: (mp.variants as unknown[]).map(
+                    (v) => Number(v) | 0,
+                  ),
+                }))
+            : undefined;
+
+          const primGpu: PrimitiveGpu = {
+            vao,
+            indexCount,
+            indexType,
+            baseColor: [0.8, 0.8, 0.8, 1.0],
+            metallic: 0.1,
+            roughness: 0.5,
+            clearcoat: 0.0,
+            clearcoatRoughness: 0.04,
+            positions: posData,
+            indices: idxDataRaw,
+            texture: null,
+            metallicRoughnessTexture: null,
+            normalTexture: null,
+            occlusionTexture: null,
+            normalScale: 1.0,
+            occlusionStrength: 1.0,
+            buffers,
+            materialIndex: prim.material,
+            defaultMaterialIndex: prim.material,
+            variantMappings,
+            pluginData,
+            customProgram,
+            customUniforms,
+            isTransmissive: false,
+          };
+          applyGltfMaterialToPrimitive(primGpu, mat, gpuTextures, pluginData);
+          meshGpu.primitives.push(primGpu);
+        } catch (primErr) {
+          gl.bindVertexArray(null);
+          if (vao) gl.deleteVertexArray(vao);
+          for (const b of buffers) {
+            if (b) gl.deleteBuffer(b);
+          }
+          throw primErr;
+        }
+      }
     }
-
-    meshes.push(meshGpu);
+  } catch (err) {
+    disposeMeshHandles(gl, meshes, gpuTextures);
+    throw err;
   }
 
-  if (!isFinite(min[0])) min = [-1, -1, -1];
-  if (!isFinite(max[0])) max = [1, 1, 1];
-  const center: [number, number, number] = [
-    (min[0] + max[0]) / 2,
-    (min[1] + max[1]) / 2,
-    (min[2] + max[2]) / 2,
-  ];
-  const dx = max[0] - min[0];
-  const dy = max[1] - min[1];
-  const dz = max[2] - min[2];
-  const radius = Math.max(Math.hypot(dx, dy, dz) / 2, 0.5);
-  const minCoord: [number, number, number] = [min[0], min[1], min[2]];
-  const maxCoord: [number, number, number] = [max[0], max[1], max[2]];
+  const bounds = finalizeBoundsFromMinMax(min, max);
   let animations = data.animations;
-  if (!animations) {
+  if (data.animationsParsed === false || !animations) {
     for (const plugin of registeredPlugins) {
       plugin.onParseGLB?.(data);
-      if (data.animations) {
+      if (data.animationsParsed !== false && data.animations) {
         animations = data.animations;
         break;
       }
@@ -1458,7 +1682,7 @@ function buildGpuScene(
 
   return {
     meshes,
-    bounds: {center, radius, min: minCoord, max: maxCoord},
+    bounds,
     lights,
     animations,
     worldMatrices: nodeWorldMatrices,
@@ -1482,6 +1706,267 @@ function bindMaterialTexture(
     gl.uniform1i(sampler, unit);
   }
   gl.uniform1i(present, texture ? 1 : 0);
+}
+
+export function createEditReceipt(
+  partial: Partial<SceneEditReceipt> & {status: SceneEditReceipt['status']},
+): SceneEditReceipt {
+  return {
+    editId: partial.editId ?? 0,
+    revision: partial.revision ?? 0,
+    status: partial.status,
+    applied: partial.applied ?? false,
+    targets: partial.targets ? [...partial.targets] : [],
+    replacedMeshNames: partial.replacedMeshNames
+      ? [...partial.replacedMeshNames]
+      : [],
+    replacementMeshNames: partial.replacementMeshNames
+      ? [...partial.replacementMeshNames]
+      : [],
+    previousBounds: partial.previousBounds ?? null,
+    candidateBounds: partial.candidateBounds ?? null,
+    constraints: partial.constraints ? [...partial.constraints] : [],
+    warnings: partial.warnings ? [...partial.warnings] : [],
+    errors: partial.errors ? [...partial.errors] : [],
+    undoDepth: partial.undoDepth ?? 0,
+  };
+}
+
+function addMeshListGpuHandles(list: MeshGpu[], refs: Set<unknown>): void {
+  for (const mesh of list) {
+    for (const p of mesh.primitives) {
+      if (p.vao) refs.add(p.vao);
+      if (p.buffers) for (const b of p.buffers) if (b) refs.add(b);
+      if (p.texture) refs.add(p.texture);
+      if (p.metallicRoughnessTexture) refs.add(p.metallicRoughnessTexture);
+      if (p.normalTexture) refs.add(p.normalTexture);
+      if (p.occlusionTexture) refs.add(p.occlusionTexture);
+      if (p.customProgram) refs.add(p.customProgram);
+    }
+  }
+}
+
+function resolveTargetMeshes(
+  targetSpec: string | string[],
+  meshPool: MeshGpu[],
+  gltf: any,
+  allowDuplicates: boolean,
+): {
+  targets: string[];
+  meshes: MeshGpu[];
+  indices: number[];
+  groupMatrix: Float32Array | null;
+  error?: string;
+} {
+  const targets = (Array.isArray(targetSpec) ? targetSpec : [targetSpec])
+    .map((t) => (typeof t === 'string' ? t.trim() : ''))
+    .filter(Boolean);
+  if (!targets.length) {
+    return {
+      targets: [],
+      meshes: [],
+      indices: [],
+      groupMatrix: null,
+      error: 'Target edit requires at least one non-empty target name.',
+    };
+  }
+  const meshes: MeshGpu[] = [];
+  const indices: number[] = [];
+  const seen = new Set<MeshGpu>();
+  let groupMatrix: Float32Array | null = null;
+  const addIndices = (idxList: number[]) => {
+    for (const idx of idxList) {
+      const m = meshPool[idx];
+      if (!seen.has(m)) {
+        seen.add(m);
+        meshes.push(m);
+        indices.push(idx);
+      }
+    }
+  };
+
+  for (const tName of targets) {
+    const direct: number[] = [];
+    for (let i = 0; i < meshPool.length; i++) {
+      if (meshPool[i].name === tName) direct.push(i);
+    }
+    if (direct.length > 1 && !allowDuplicates) {
+      return {
+        targets,
+        meshes: [],
+        indices: [],
+        groupMatrix: null,
+        error: `Ambiguous target "${tName}": matched ${direct.length} duplicate meshes.`,
+      };
+    }
+    if (direct.length) {
+      addIndices(direct);
+      continue;
+    }
+    if (Array.isArray(gltf?.nodes)) {
+      const nodes: number[] = [];
+      for (let nIdx = 0; nIdx < gltf.nodes.length; nIdx++) {
+        if (gltf.nodes[nIdx]?.name === tName) nodes.push(nIdx);
+      }
+      if (nodes.length > 1 && !allowDuplicates) {
+        return {
+          targets,
+          meshes: [],
+          indices: [],
+          groupMatrix: null,
+          error: `Ambiguous target node "${tName}": matched ${nodes.length} duplicate nodes.`,
+        };
+      }
+      if (nodes.length) {
+        const sub = new Set<number>();
+        const stack = [...nodes];
+        while (stack.length) {
+          const curr = stack.pop()!;
+          if (sub.has(curr)) continue;
+          sub.add(curr);
+          const ch = gltf.nodes[curr]?.children;
+          if (Array.isArray(ch)) {
+            for (const c of ch) if (typeof c === 'number') stack.push(c);
+          }
+        }
+        const grp: number[] = [];
+        for (let i = 0; i < meshPool.length; i++) {
+          if (sub.has(meshPool[i].nodeIndex)) grp.push(i);
+        }
+        if (grp.length) {
+          if (targets.length === 1 && nodes.length === 1) {
+            groupMatrix = resolveNodeWorldMatrices(gltf)[nodes[0]] || null;
+          }
+          addIndices(grp);
+          continue;
+        }
+      }
+    }
+    return {
+      targets,
+      meshes: [],
+      indices: [],
+      groupMatrix: null,
+      error: `Target "${tName}" was not found in scene.`,
+    };
+  }
+  return {targets, meshes, indices, groupMatrix};
+}
+
+function evaluateConstraints(
+  constraints: SceneEditConstraints | undefined,
+  prevBounds: SceneBoundingBox,
+  candBounds: SceneBoundingBox,
+  candMeshes: MeshGpu[],
+  sceneMeshes: MeshGpu[],
+  gltf: any,
+): SceneConstraintCheck[] {
+  if (!constraints) return [];
+  const checks: SceneConstraintCheck[] = [];
+  const pSz = [0, 1, 2].map((i) => prevBounds.max[i] - prevBounds.min[i]);
+  const cSz = [0, 1, 2].map((i) => candBounds.max[i] - candBounds.min[i]);
+  const fmt = (n: number) => Number(n.toFixed(4)).toString();
+  const fmtVec = (v: number[]) => `[${v.map(fmt).join(', ')}]`;
+  const rel = (a: number, b: number) => Math.abs(a - b) / Math.max(b, 1e-4);
+  const getTol = (v: unknown, def: number) =>
+    typeof v === 'object' && v && (v as any).tolerance !== undefined
+      ? Math.max(0, Number((v as any).tolerance))
+      : def;
+  const push = (
+    name: SceneConstraintCheck['name'],
+    passed: boolean,
+    expected: string,
+    actual: string,
+    tolerance?: number,
+  ) =>
+    checks.push({
+      name,
+      passed,
+      expected,
+      actual,
+      tolerance,
+      message: passed
+        ? undefined
+        : `Constraint "${name}" violated: expected ${expected}, got ${actual}.`,
+    });
+
+  if (constraints.preserveHeight) {
+    const tol = getTol(constraints.preserveHeight, 0.05);
+    push(
+      'preserveHeight',
+      rel(cSz[1], pSz[1]) <= tol + 1e-6,
+      `${fmt(pSz[1])} (±${fmt(tol * 100)}%)`,
+      fmt(cSz[1]),
+      tol,
+    );
+  }
+  if (constraints.preserveBounds) {
+    const tol = getTol(constraints.preserveBounds, 0.1);
+    push(
+      'preserveBounds',
+      Math.max(rel(cSz[0], pSz[0]), rel(cSz[1], pSz[1]), rel(cSz[2], pSz[2])) <=
+        tol + 1e-6,
+      fmtVec(pSz),
+      fmtVec(cSz),
+      tol,
+    );
+  }
+  if (constraints.preserveFootprint) {
+    const tol = getTol(constraints.preserveFootprint, 0.1);
+    push(
+      'preserveFootprint',
+      Math.max(rel(cSz[0], pSz[0]), rel(cSz[2], pSz[2])) <= tol + 1e-6,
+      fmtVec([pSz[0], pSz[2]]),
+      fmtVec([cSz[0], cSz[2]]),
+      tol,
+    );
+  }
+  if (constraints.maxBounds) {
+    const lim = constraints.maxBounds;
+    push(
+      'maxBounds',
+      cSz[0] <= lim[0] + 1e-6 &&
+        cSz[1] <= lim[1] + 1e-6 &&
+        cSz[2] <= lim[2] + 1e-6,
+      `<=${fmtVec(lim)}`,
+      fmtVec(cSz),
+    );
+  }
+  if (constraints.matchMaterialOf) {
+    const refName = constraints.matchMaterialOf;
+    const refPrim = resolveTargetMeshes(refName, sceneMeshes, gltf, true)
+      .meshes[0]?.primitives[0];
+    if (!refPrim) {
+      push('matchMaterialOf', false, `material of "${refName}"`, 'missing reference mesh');
+    } else {
+      const tol = 0.05;
+      const desc = (p: PrimitiveGpu) =>
+        `[${p.baseColor.map(fmt).join(',')}],m=${fmt(p.metallic)},r=${fmt(p.roughness)},tex=${Boolean(p.texture)}`;
+      const expDesc = desc(refPrim);
+      let actualDesc = expDesc;
+      let passed = true;
+      for (const m of candMeshes) {
+        for (const p of m.primitives) {
+          const cDiff = Math.max(
+            ...[0, 1, 2, 3].map((i) => Math.abs(p.baseColor[i] - refPrim.baseColor[i])),
+          );
+          if (
+            cDiff > tol ||
+            Math.abs(p.metallic - refPrim.metallic) > tol ||
+            Math.abs(p.roughness - refPrim.roughness) > tol ||
+            p.texture !== refPrim.texture
+          ) {
+            passed = false;
+            actualDesc = desc(p);
+            break;
+          }
+        }
+        if (!passed) break;
+      }
+      push('matchMaterialOf', passed, expDesc, actualDesc, tol);
+    }
+  }
+  return checks;
 }
 
 export class ThreeView {
@@ -1591,6 +2076,36 @@ export class ThreeView {
   private lastReportedTheta = -999;
   private lastReportedPhi = -999;
   private lastReportedZoom = -999;
+
+  private editCounter = 0;
+  private sceneRevision = 0;
+  private maxUndoSteps = 8;
+  private activePreview: {
+    editId: number;
+    revision: number;
+    targets: string[];
+    replacedMeshes: MeshGpu[];
+    replacedIndices: number[];
+    candidateMeshes: MeshGpu[];
+    extraTextures: Array<WebGLTexture | null>;
+    previousBounds: SceneBoundingBox;
+    candidateBounds: SceneBoundingBox;
+    constraints: SceneConstraintCheck[];
+    warnings: string[];
+  } | null = null;
+  private undoStack: Array<{
+    editId: number;
+    revision: number;
+    targets: string[];
+    replacedMeshes: MeshGpu[];
+    replacedIndices: number[];
+    candidateMeshes: MeshGpu[];
+    extraTextures: Array<WebGLTexture | null>;
+    previousBounds: SceneBoundingBox;
+    candidateBounds: SceneBoundingBox;
+    constraints: SceneConstraintCheck[];
+    warnings: string[];
+  }> = [];
 
   public static registerDecoder(type: string, decoder: MeshDecoder): void {
     registerDecoder(type, decoder);
@@ -1837,6 +2352,7 @@ export class ThreeView {
       availableVariants,
     } = buildGpuScene(this.gl, glbData, limits, () => this.render());
     this.disposeMeshGpuResources();
+    this.sceneRevision++;
     this.meshes = meshes;
     this.bounds = bounds;
     this.turntableRotation = 0;
@@ -1927,6 +2443,7 @@ export class ThreeView {
    */
   public clearScene(): void {
     this.disposeMeshGpuResources();
+    this.sceneRevision++;
     this.lights = [];
     this.animations = [];
     this.currentClip = null;
@@ -2317,65 +2834,12 @@ export class ThreeView {
         }
         if (targetMatIdx === undefined || !materials[targetMatIdx]) {
           prim.materialIndex = undefined;
-          prim.baseColor = [0.8, 0.8, 0.8, 1.0];
-          prim.metallic = 0.1;
-          prim.roughness = 0.5;
-          prim.clearcoat = 0.0;
-          prim.clearcoatRoughness = 0.04;
-          prim.texture = null;
-          prim.metallicRoughnessTexture = null;
-          prim.normalTexture = null;
-          prim.normalScale = 1.0;
-          prim.occlusionTexture = null;
-          prim.occlusionStrength = 1.0;
-          prim.isTransmissive = false;
+          applyGltfMaterialToPrimitive(prim, null, this.gpuTextures);
           continue;
         }
         const mat = materials[targetMatIdx];
         prim.materialIndex = targetMatIdx;
-        const pbr = mat.pbrMetallicRoughness;
-        prim.baseColor = pbr?.baseColorFactor
-          ? [
-              pbr.baseColorFactor[0],
-              pbr.baseColorFactor[1],
-              pbr.baseColorFactor[2],
-              pbr.baseColorFactor[3] ?? 1.0,
-            ]
-          : [0.8, 0.8, 0.8, 1.0];
-        prim.metallic = pbr?.metallicFactor ?? 0.1;
-        prim.roughness = pbr?.roughnessFactor ?? 0.5;
-        const ccExt = mat.extensions?.KHR_materials_clearcoat;
-        prim.clearcoat = ccExt ? (ccExt.clearcoatFactor ?? 1.0) : 0.0;
-        prim.clearcoatRoughness = Math.max(
-          0.04,
-          ccExt?.clearcoatRoughnessFactor ?? 0.04,
-        );
-        prim.texture =
-          pbr?.baseColorTexture !== undefined &&
-          this.gpuTextures[pbr.baseColorTexture.index]
-            ? this.gpuTextures[pbr.baseColorTexture.index]
-            : null;
-        prim.metallicRoughnessTexture =
-          pbr?.metallicRoughnessTexture !== undefined &&
-          this.gpuTextures[pbr.metallicRoughnessTexture.index]
-            ? this.gpuTextures[pbr.metallicRoughnessTexture.index]
-            : null;
-        prim.normalTexture =
-          mat.normalTexture !== undefined &&
-          this.gpuTextures[mat.normalTexture.index]
-            ? this.gpuTextures[mat.normalTexture.index]
-            : null;
-        prim.normalScale = mat.normalTexture?.scale ?? 1.0;
-        prim.occlusionTexture =
-          mat.occlusionTexture !== undefined &&
-          this.gpuTextures[mat.occlusionTexture.index]
-            ? this.gpuTextures[mat.occlusionTexture.index]
-            : null;
-        prim.occlusionStrength = mat.occlusionTexture?.strength ?? 1.0;
-        prim.isTransmissive = Boolean(
-          mat.extensions?.KHR_materials_transmission ||
-            prim.pluginData?.materials?.isTransmissive,
-        );
+        applyGltfMaterialToPrimitive(prim, mat, this.gpuTextures);
       }
     }
     return true;
@@ -3830,45 +4294,442 @@ export class ThreeView {
     }
   }
 
+  private collectReferencedGpuHandles(): Set<unknown> {
+    const refs = new Set<unknown>();
+    addMeshListGpuHandles(this.meshes, refs);
+    addMeshListGpuHandles(this.backdropMeshes, refs);
+    if (this.activePreview) {
+      addMeshListGpuHandles(this.activePreview.replacedMeshes, refs);
+      addMeshListGpuHandles(this.activePreview.candidateMeshes, refs);
+    }
+    for (const entry of this.undoStack) {
+      addMeshListGpuHandles(entry.replacedMeshes, refs);
+      addMeshListGpuHandles(entry.candidateMeshes, refs);
+    }
+    if (this.availableVariants.length > 0) {
+      for (const tex of this.gpuTextures) if (tex) refs.add(tex);
+    }
+    if (this.environmentTexture) refs.add(this.environmentTexture);
+    if (this.skyboxTexture) refs.add(this.skyboxTexture);
+    if (this.pickTexture) refs.add(this.pickTexture);
+    return refs;
+  }
+
+  private disposeUnreferencedGpuResources(
+    list: MeshGpu[],
+    extraTextures?: Array<WebGLTexture | null>,
+  ): void {
+    const keep = this.collectReferencedGpuHandles();
+    disposeMeshHandles(this.gl, list, extraTextures, keep);
+    for (let i = 0; i < this.gpuTextures.length; i++) {
+      const tex = this.gpuTextures[i];
+      if (tex && !keep.has(tex)) this.gpuTextures[i] = null;
+    }
+  }
+
+  private spliceMeshes(
+    fromMeshes: MeshGpu[],
+    toMeshes: MeshGpu[],
+    indices: number[],
+    isBackward = false,
+  ): void {
+    if (isBackward) {
+      for (let i = 0; i < toMeshes.length; i++) {
+        if (fromMeshes[i]) toMeshes[i].__replacedFrom = fromMeshes[i];
+      }
+    }
+    if (fromMeshes.length === toMeshes.length) {
+      for (let i = 0; i < fromMeshes.length; i++) {
+        const idx = this.meshes.indexOf(fromMeshes[i]);
+        if (idx >= 0) this.meshes[idx] = toMeshes[i];
+      }
+      return;
+    }
+    const removeSet = new Set(fromMeshes);
+    if (isBackward) {
+      const next = this.meshes.filter((m) => !removeSet.has(m));
+      const pairs = toMeshes
+        .map((mesh, i) => ({mesh, idx: indices[i] ?? next.length + i}))
+        .sort((a, b) => a.idx - b.idx);
+      for (const p of pairs) {
+        next.splice(Math.max(0, Math.min(p.idx, next.length)), 0, p.mesh);
+      }
+      this.meshes = next;
+    } else {
+      const insertAt = indices.length
+        ? Math.max(0, Math.min(indices[0], this.meshes.length))
+        : this.meshes.length;
+      const next: MeshGpu[] = [];
+      let inserted = false;
+      for (let i = 0; i < this.meshes.length; i++) {
+        if (i === insertAt && !inserted) {
+          next.push(...toMeshes);
+          inserted = true;
+        }
+        if (!removeSet.has(this.meshes[i])) next.push(this.meshes[i]);
+      }
+      if (!inserted) next.push(...toMeshes);
+      this.meshes = next;
+    }
+  }
+
+  public previewEdit(options: SceneEditOptions): SceneEditReceipt {
+    const editId = ++this.editCounter;
+    const warnings = options.warnings ? [...options.warnings] : [];
+    if (this.activePreview) this.rejectEdit();
+
+    const resolved = resolveTargetMeshes(
+      options.target,
+      this.meshes,
+      this.gltf,
+      Boolean(options.allowDuplicateTargets),
+    );
+    const fail = (
+      errors: string[],
+      extra?: Partial<SceneEditReceipt>,
+    ): SceneEditReceipt =>
+      createEditReceipt({
+        editId,
+        revision: this.sceneRevision,
+        status: 'rejected',
+        targets: resolved.targets,
+        warnings,
+        errors,
+        undoDepth: this.undoStack.length,
+        ...extra,
+      });
+
+    if (resolved.error || !resolved.meshes.length) {
+      return fail([resolved.error || 'No target meshes matched in scene.']);
+    }
+
+    const replacedMeshes = resolved.meshes;
+    const replacedMeshNames = replacedMeshes.map((m) => m.name);
+    const previousBounds = computeMeshListBounds(replacedMeshes);
+
+    let matSrc: PrimitiveGpu | null = null;
+    if (options.copyMaterialFrom) {
+      matSrc =
+        resolveTargetMeshes(options.copyMaterialFrom, this.meshes, this.gltf, true)
+          .meshes[0]?.primitives[0] || null;
+      if (!matSrc) {
+        return fail(
+          [`Material source "${options.copyMaterialFrom}" was not found.`],
+          {replacedMeshNames, previousBounds},
+        );
+      }
+    }
+
+    let built: ReturnType<typeof buildGpuScene>;
+    let candGltf: GLBData;
+    try {
+      candGltf = toGLBData(options.replacement);
+      built = buildGpuScene(this.gl, candGltf, options.limits, () =>
+        this.render(),
+      );
+    } catch (err: any) {
+      return fail([err?.message || String(err)], {
+        replacedMeshNames,
+        previousBounds,
+      });
+    }
+
+    let candidateMeshes = built.meshes;
+    if (options.replacementTarget !== undefined) {
+      const sub = resolveTargetMeshes(
+        options.replacementTarget,
+        built.meshes,
+        candGltf.gltf,
+        true,
+      );
+      if (sub.error || !sub.meshes.length) {
+        this.disposeUnreferencedGpuResources(built.meshes, built.gpuTextures);
+        return fail(
+          [sub.error || 'Replacement target not found in candidate GLB.'],
+          {replacedMeshNames, previousBounds},
+        );
+      }
+      const keepSet = new Set(sub.meshes);
+      const unused = built.meshes.filter((m) => !keepSet.has(m));
+      candidateMeshes = sub.meshes;
+      if (unused.length) {
+        const keep = this.collectReferencedGpuHandles();
+        addMeshListGpuHandles(candidateMeshes, keep);
+        disposeMeshHandles(this.gl, unused, undefined, keep);
+      }
+    }
+
+    if (!candidateMeshes.length) {
+      this.disposeUnreferencedGpuResources(built.meshes, built.gpuTextures);
+      return fail(['Replacement payload contains no renderable meshes.'], {
+        replacedMeshNames,
+        previousBounds,
+      });
+    }
+
+    if (options.preserveTransform !== false) {
+      if (candidateMeshes.length === replacedMeshes.length) {
+        for (let i = 0; i < candidateMeshes.length; i++) {
+          candidateMeshes[i].transform = new Float32Array(
+            replacedMeshes[i].transform,
+          );
+          candidateMeshes[i].normalMatrix = new Float32Array(
+            replacedMeshes[i].normalMatrix,
+          );
+          candidateMeshes[i].__replacedFrom = replacedMeshes[i];
+          if (options.preserveTargetName !== false) {
+            candidateMeshes[i].name = replacedMeshes[i].name;
+          }
+          if (!candidateMeshes[i].extras && replacedMeshes[i].extras) {
+            candidateMeshes[i].extras = replacedMeshes[i].extras;
+          }
+        }
+      } else {
+        const parentMat = resolved.groupMatrix || replacedMeshes[0].transform;
+        for (let i = 0; i < candidateMeshes.length; i++) {
+          const combined = mat4Create();
+          mat4Multiply(combined, parentMat, candidateMeshes[i].transform);
+          candidateMeshes[i].transform = combined;
+          const norm = new Float32Array(9);
+          mat3NormalFromMat4(norm, combined);
+          candidateMeshes[i].normalMatrix = norm;
+          if (i === 0) candidateMeshes[0].__replacedFrom = replacedMeshes[0];
+        }
+      }
+    } else if (
+      options.preserveTargetName !== false &&
+      candidateMeshes.length === 1 &&
+      replacedMeshes.length === 1
+    ) {
+      candidateMeshes[0].name = replacedMeshes[0].name;
+      candidateMeshes[0].__replacedFrom = replacedMeshes[0];
+    }
+
+    if (matSrc) {
+      for (const cm of candidateMeshes) {
+        for (const p of cm.primitives) {
+          p.baseColor = [...matSrc.baseColor];
+          p.metallic = matSrc.metallic;
+          p.roughness = matSrc.roughness;
+          p.clearcoat = matSrc.clearcoat;
+          p.clearcoatRoughness = matSrc.clearcoatRoughness;
+          p.texture = matSrc.texture;
+          p.metallicRoughnessTexture = matSrc.metallicRoughnessTexture;
+          p.normalTexture = matSrc.normalTexture;
+          p.normalScale = matSrc.normalScale;
+          p.occlusionTexture = matSrc.occlusionTexture;
+          p.occlusionStrength = matSrc.occlusionStrength;
+          p.isTransmissive = matSrc.isTransmissive;
+        }
+      }
+    }
+
+    const candidateBounds = computeMeshListBounds(candidateMeshes);
+    const constraints = evaluateConstraints(
+      options.constraints,
+      previousBounds,
+      candidateBounds,
+      candidateMeshes,
+      this.meshes,
+      this.gltf,
+    );
+    const failed = constraints.filter((c) => !c.passed);
+    const replacementMeshNames = candidateMeshes.map((m) => m.name);
+
+    if (failed.length && options.rejectOnConstraintViolation !== false) {
+      this.disposeUnreferencedGpuResources(candidateMeshes, built.gpuTextures);
+      return fail(
+        failed.map((c) => c.message || `Constraint "${c.name}" failed.`),
+        {
+          replacedMeshNames,
+          replacementMeshNames,
+          previousBounds,
+          candidateBounds,
+          constraints,
+        },
+      );
+    }
+
+    const revision = ++this.sceneRevision;
+    this.activePreview = {
+      editId,
+      revision,
+      targets: resolved.targets,
+      replacedMeshes,
+      replacedIndices: resolved.indices,
+      candidateMeshes,
+      extraTextures: built.gpuTextures,
+      previousBounds,
+      candidateBounds,
+      constraints,
+      warnings,
+    };
+
+    this.spliceMeshes(replacedMeshes, candidateMeshes, resolved.indices, false);
+    this.bounds = computeMeshListBounds(this.meshes);
+    this.disposeUnreferencedGpuResources([], built.gpuTextures);
+    if (this.gl) this.render();
+
+    return createEditReceipt({
+      editId,
+      revision,
+      status: 'preview',
+      applied: true,
+      targets: resolved.targets,
+      replacedMeshNames,
+      replacementMeshNames,
+      previousBounds,
+      candidateBounds,
+      constraints,
+      warnings,
+      undoDepth: this.undoStack.length,
+    });
+  }
+
+  public acceptEdit(): SceneEditReceipt {
+    if (!this.activePreview) {
+      return createEditReceipt({
+        editId: this.editCounter,
+        revision: this.sceneRevision,
+        status: 'rejected',
+        errors: ['No active preview edit to accept.'],
+        undoDepth: this.undoStack.length,
+      });
+    }
+    const p = this.activePreview;
+    this.activePreview = null;
+    this.undoStack.push(p);
+    while (this.undoStack.length > this.maxUndoSteps) {
+      const evicted = this.undoStack.shift()!;
+      this.disposeUnreferencedGpuResources(
+        evicted.replacedMeshes,
+        evicted.extraTextures,
+      );
+    }
+    return this.entryToReceipt(p, 'accepted', true, p.revision);
+  }
+
+  public rejectEdit(): SceneEditReceipt {
+    if (!this.activePreview) {
+      return createEditReceipt({
+        editId: this.editCounter,
+        revision: this.sceneRevision,
+        status: 'rejected',
+        errors: ['No active preview edit to reject.'],
+        undoDepth: this.undoStack.length,
+      });
+    }
+    const p = this.activePreview;
+    this.activePreview = null;
+    this.spliceMeshes(p.candidateMeshes, p.replacedMeshes, p.replacedIndices, true);
+    this.bounds = computeMeshListBounds(this.meshes);
+    this.disposeUnreferencedGpuResources(p.candidateMeshes, p.extraTextures);
+    const rev = ++this.sceneRevision;
+    if (this.gl) this.render();
+    return this.entryToReceipt(p, 'rejected', false, rev);
+  }
+
+  public undoEdit(): SceneEditReceipt {
+    if (this.activePreview && !this.undoStack.length) {
+      return {...this.rejectEdit(), status: 'undone', applied: true};
+    }
+    if (this.activePreview) this.rejectEdit();
+    if (!this.undoStack.length) {
+      return createEditReceipt({
+        editId: this.editCounter,
+        revision: this.sceneRevision,
+        status: 'rejected',
+        errors: ['No accepted scene edits available to undo.'],
+      });
+    }
+    const e = this.undoStack.pop()!;
+    this.spliceMeshes(e.candidateMeshes, e.replacedMeshes, e.replacedIndices, true);
+    this.bounds = computeMeshListBounds(this.meshes);
+    this.disposeUnreferencedGpuResources(e.candidateMeshes, e.extraTextures);
+    const rev = ++this.sceneRevision;
+    if (this.gl) this.render();
+    return this.entryToReceipt(e, 'undone', true, rev);
+  }
+
+  private entryToReceipt(
+    e: NonNullable<typeof this.activePreview>,
+    status: SceneEditReceipt['status'],
+    applied: boolean,
+    revision: number,
+  ): SceneEditReceipt {
+    return createEditReceipt({
+      editId: e.editId,
+      revision,
+      status,
+      applied,
+      targets: e.targets,
+      replacedMeshNames: e.replacedMeshes.map((m) => m.name),
+      replacementMeshNames: e.candidateMeshes.map((m) => m.name),
+      previousBounds: e.previousBounds,
+      candidateBounds: e.candidateBounds,
+      constraints: e.constraints,
+      warnings: e.warnings,
+      undoDepth: this.undoStack.length,
+    });
+  }
+
+  public getEditHistory(): {
+    activePreview: SceneEditReceipt | null;
+    undoStack: SceneEditReceipt[];
+    maxUndoSteps: number;
+    revision: number;
+  } {
+    return {
+      activePreview: this.activePreview
+        ? this.entryToReceipt(
+            this.activePreview,
+            'preview',
+            true,
+            this.activePreview.revision,
+          )
+        : null,
+      undoStack: this.undoStack.map((e) =>
+        this.entryToReceipt(e, 'accepted', true, e.revision),
+      ),
+      maxUndoSteps: this.maxUndoSteps,
+      revision: this.sceneRevision,
+    };
+  }
+
+  public setMaxUndoSteps(maxSteps: number): void {
+    this.maxUndoSteps = Math.max(0, Math.floor(Number(maxSteps) || 0));
+    while (this.undoStack.length > this.maxUndoSteps) {
+      const evicted = this.undoStack.shift()!;
+      this.disposeUnreferencedGpuResources(
+        evicted.replacedMeshes,
+        evicted.extraTextures,
+      );
+    }
+  }
+
   private disposeMeshListGpuResources(
     list: MeshGpu[],
     extraTextures?: Array<WebGLTexture | null>,
   ): void {
-    const gl = this.gl;
-    const deletedTextures = new Set<WebGLTexture>();
-    const deleteTex = (tex: WebGLTexture | null | undefined) => {
-      if (tex && !deletedTextures.has(tex)) {
-        deletedTextures.add(tex);
-        gl.deleteTexture(tex);
-      }
-    };
-    for (const mesh of list) {
-      for (const prim of mesh.primitives) {
-        if (prim.vao) {
-          gl.deleteVertexArray(prim.vao);
-        }
-        if (prim.buffers) {
-          for (const buf of prim.buffers) {
-            gl.deleteBuffer(buf);
-          }
-        }
-        deleteTex(prim.texture);
-        deleteTex(prim.metallicRoughnessTexture);
-        deleteTex(prim.normalTexture);
-        deleteTex(prim.occlusionTexture);
-        if (prim.customProgram) {
-          gl.deleteProgram(prim.customProgram);
-        }
-      }
-    }
-    if (extraTextures) {
-      for (const tex of extraTextures) {
-        deleteTex(tex);
-      }
-    }
+    disposeMeshHandles(this.gl, list, extraTextures);
   }
 
   private disposeMeshGpuResources(): void {
+    const preview = this.activePreview;
+    const stack = this.undoStack.splice(0, this.undoStack.length);
+    this.activePreview = null;
+    if (preview) {
+      this.disposeUnreferencedGpuResources(
+        [...preview.replacedMeshes, ...preview.candidateMeshes],
+        preview.extraTextures,
+      );
+    }
+    for (const entry of stack) {
+      this.disposeUnreferencedGpuResources(
+        [...entry.replacedMeshes, ...entry.candidateMeshes],
+        entry.extraTextures,
+      );
+    }
     this.disposeMeshListGpuResources(this.meshes, this.gpuTextures);
     this.meshes = [];
     this.gpuTextures = [];

@@ -82,15 +82,15 @@ Three-Live keeps its web footprint small so you can drop 3D or XR into a page
 without shipping unused code. Every bundle and plugin works on both prebuilt
 `.glb`, `.usdz`, and `.spz` assets and live `<script type="text/three">` scenes:
 
-*   **Compact core (`< 28 KB` to `< 71 KB gz`):** The 3D viewer
-    (`three-live-viewer.min.js`) is `< 28 KB gz` (`< 59 KB gz` with the live
+*   **Compact core (`< 32 KB` to `< 75 KB gz`):** The 3D viewer
+    (`three-live-viewer.min.js`) is `< 32 KB gz` (`< 64 KB gz` with the live
     Three.js compiler in `three-live.min.js`), and the WebXR viewer
-    (`xr-live-viewer.min.js`) is `< 50 KB gz` (`< 71 KB gz` with the live
+    (`xr-live-viewer.min.js`) is `< 54 KB gz` (`< 75 KB gz` with the live
     Three.js compiler in `xr-live.min.js`).
 *   **Core 3D, CAD, and animation plugins (`<three-live>`, 13 plugins):**
     Optional domain bundles (`three-live-studio.min.js` at `< 22 KB gz`,
     `three-live-cad.min.js` at `< 9 KB gz`, and `three-live-animation.min.js` at
-    `< 8 KB gz`, or `< 91 KB gz` combined in `three-live-full.min.js`) add
+    `< 8 KB gz`, or `< 96 KB gz` combined in `three-live-full.min.js`) add
     `KHR_interactivity` behavior graphs, PBR Next materials,
     `KHR_materials_variants`, `EXT_meshopt_compression`, HDRI and
     spherical-harmonics lighting, contact shadows, 3D hotspots, post-processing
@@ -395,18 +395,18 @@ following table lists each bundle and its enforced gzipped budget:
 <!-- mdformat off(reason: preserve GFM single-line pipe tables for GitHub) -->
 | Family | Bundle file | Enforced budget (`.min.js.gz`) | Included capabilities |
 | :--------------- | :-------------------------------- | :------------: | :-------------------------- |
-| **`three-live`** | **`three-live-viewer.min.js`** | **`< 28 KB gz`** | Lean `.glb` and `.usdz` WebGL2 PBR viewer, TRS animations, orbit controls, and AR packager. |
-|  | **`three-live.min.js`** | **`< 59 KB gz`** | Standard `<three-live>` + **`three-author`** (`<script type="text/three">`, `InstancedMesh` GPU instancing, `KHR_interactivity` compiler, 5 tone-mapping modes, contact shadows) + AR packager. |
+| **`three-live`** | **`three-live-viewer.min.js`** | **`< 32 KB gz`** | Lean `.glb` and `.usdz` WebGL2 PBR viewer, TRS animations, orbit controls, and AR packager. |
+|  | **`three-live.min.js`** | **`< 64 KB gz`** | Standard `<three-live>` + **`three-author`** (`<script type="text/three">`, `InstancedMesh` GPU instancing, `KHR_interactivity` compiler, 5 tone-mapping modes, contact shadows) + AR packager. |
 |  | **`three-live-studio.min.js`** | **`< 22 KB gz`** | Add-on plugin: PBR Next extensions, HDRI and SH irradiance, `bloom`/`outline` post-processing, `KHR_materials_variants`, `EXT_meshopt_compression`, `KHR_interactivity` VM, 3D hotspots, and WebXR AR. |
 |  | **`three-live-cad.min.js`** | **`< 9 KB gz`** | Add-on plugin: 2D `Path`/`Shape` with earcut hole triangulation, `ExtrudeGeometry` with beveling, 3D `CSG` BSP Booleans (`union`, `subtract`, `intersect`), and 3D Hershey `TextGeometry`. |
 |  | **`three-live-animation.min.js`** | **`< 8 KB gz`** | Add-on plugin: 64-joint GPU skeletal skinning, morph targets, animation cross-fading, and two-bone / FABRIK inverse kinematics (`ik` / `THREE.IKSolver`). |
-|  | **`three-live-full.min.js`** | **`< 91 KB gz`** | All-in-one 3D bundle (`three-live` + `studio` + `cad` + `animation`, all 13 plugins auto-registered). |
-| **`xr-live`** | **`xr-live-viewer.min.js`** | **`< 50 KB gz`** | Lean `.glb` and `.usdz` WebXR viewer + spatial traits (`grab`, `scale`, `billboard`, `anchor`), `<div slot="spatial">`, and mobile AR bridge. |
-|  | **`xr-live.min.js`** | **`< 71 KB gz`** | Standard `<xr-live>` + **`three-author`** (`<script type="text/three">`) + runtime USDZ and GLB compiler. |
+|  | **`three-live-full.min.js`** | **`< 96 KB gz`** | All-in-one 3D bundle (`three-live` + `studio` + `cad` + `animation`, all 13 plugins auto-registered). |
+| **`xr-live`** | **`xr-live-viewer.min.js`** | **`< 54 KB gz`** | Lean `.glb` and `.usdz` WebXR viewer + spatial traits (`grab`, `scale`, `billboard`, `anchor`), `<div slot="spatial">`, and mobile AR bridge. |
+|  | **`xr-live.min.js`** | **`< 75 KB gz`** | Standard `<xr-live>` + **`three-author`** (`<script type="text/three">`) + runtime USDZ and GLB compiler. |
 |  | **`xr-live-sensors.min.js`** | **`< 10 KB gz`** | Add-on plugin: Hardware XR sensors (`XRDepthManager`, `XRHeightfieldPhysics`, 25-joint `XRHandGestureClassifier`), `XRDesktopSimulator`, Spatial Audio, Skybox, and WebMCP tools. |
 |  | **`xr-live-spatial.min.js`** | **`< 56 KB gz`** | Add-on plugin bundle registering all 14 spatial plugins (`head-follow`, `manipulation-handles`, `world-understanding`, `gemini-live`, `spatial-paint`, `depth-particles`, `splat-loader`, `spatial-measure`, `magnetic-snap`, `gaze-dwell`, `exploded-view`, `persistent-anchors`, `spatial-locomotion`, `shared-room`). |
 |  | **`xr-live-sim.min.js`** | **`< 22 KB gz`** | Add-on simulation plugin bundle registering all five simulation plugins (`character-controller`, `steering-agents`, `hit-zones`, `objectives`, `synth-audio`). |
-|  | **`xr-live-full.min.js`** | **`< 177 KB gz`** | All-in-one 3D, XR, and simulation bundle (`three-live-full` + `xr-live` + `xr-live-sensors` + all 14 spatial plugins + all 5 simulation plugins). |
+|  | **`xr-live-full.min.js`** | **`< 183 KB gz`** | All-in-one 3D, XR, and simulation bundle (`three-live-full` + `xr-live` + `xr-live-sensors` + all 14 spatial plugins + all 5 simulation plugins). |
 <!-- mdformat on -->
 
 --------------------------------------------------------------------------------
