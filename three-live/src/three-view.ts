@@ -1760,6 +1760,18 @@ function getOrbitEye(v: {
   ];
 }
 
+function bindMaterialTexture(
+  gl: WebGL2RenderingContext, texture: WebGLTexture | null | undefined,
+  unit: number, sampler: WebGLUniformLocation | null, present: WebGLUniformLocation | null,
+): void {
+  if (texture) {
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.uniform1i(sampler, unit);
+  }
+  gl.uniform1i(present, texture ? 1 : 0);
+}
+
 export class ThreeView {
   readonly supportsInstanceOffsets = true;
   public gl: WebGL2RenderingContext;
@@ -2170,8 +2182,6 @@ export class ThreeView {
    * an untrusted source such as the script sandbox.
    */
   loadGLBData(glbData: GLBData, limits?: HostSceneLimits): void {
-    this.lastGlbData = glbData;
-    this.lastLimits = limits;
     const {
       meshes,
       bounds,
@@ -2181,7 +2191,12 @@ export class ThreeView {
       gpuTextures,
       availableVariants,
     } = buildGpuScene(this.gl, glbData, limits, () => this.render());
+    this.lastGlbData = glbData;
+    this.lastLimits = limits;
     this.disposeMeshGpuResources();
+    this.currentClip = null;
+    this.isPlayingAnimation = false;
+    this.animationTime = 0;
     this.meshes = meshes;
     this.bounds = bounds;
     this.turntableRotation = 0;
@@ -2284,6 +2299,9 @@ export class ThreeView {
     this.animations = [];
     this.currentClip = null;
     this.isPlayingAnimation = false;
+    this.animationTime = 0;
+    this.lastGlbData = null;
+    for (const plugin of registeredPlugins) plugin.onClearScene?.(this);
     this.worldMatrices = [];
     this.gltf = null;
     this.initialNodeTransforms = [];
@@ -4093,43 +4111,12 @@ export class ThreeView {
             );
           }
 
-          if (prim.texture) {
-            gl.activeTexture(gl.TEXTURE0);
-            gl.bindTexture(gl.TEXTURE_2D, prim.texture);
-            gl.uniform1i(u.uBaseColorTexture, 0);
-            gl.uniform1i(u.uHasTexture, 1);
-          } else {
-            gl.uniform1i(u.uHasTexture, 0);
-          }
-
-          if (prim.metallicRoughnessTexture) {
-            gl.activeTexture(gl.TEXTURE1);
-            gl.bindTexture(gl.TEXTURE_2D, prim.metallicRoughnessTexture);
-            gl.uniform1i(u.uMetallicRoughnessTexture, 1);
-            gl.uniform1i(u.uHasMetallicRoughnessTexture, 1);
-          } else {
-            gl.uniform1i(u.uHasMetallicRoughnessTexture, 0);
-          }
-
-          if (prim.normalTexture) {
-            gl.activeTexture(gl.TEXTURE2);
-            gl.bindTexture(gl.TEXTURE_2D, prim.normalTexture);
-            gl.uniform1i(u.uNormalTexture, 2);
-            gl.uniform1i(u.uHasNormalTexture, 1);
-            gl.uniform1f(u.uNormalScale, prim.normalScale);
-          } else {
-            gl.uniform1i(u.uHasNormalTexture, 0);
-          }
-
-          if (prim.occlusionTexture) {
-            gl.activeTexture(gl.TEXTURE3);
-            gl.bindTexture(gl.TEXTURE_2D, prim.occlusionTexture);
-            gl.uniform1i(u.uOcclusionTexture, 3);
-            gl.uniform1i(u.uHasOcclusionTexture, 1);
-            gl.uniform1f(u.uOcclusionStrength, prim.occlusionStrength);
-          } else {
-            gl.uniform1i(u.uHasOcclusionTexture, 0);
-          }
+          bindMaterialTexture(gl, prim.texture, 0, u.uBaseColorTexture, u.uHasTexture);
+          bindMaterialTexture(gl, prim.metallicRoughnessTexture, 1, u.uMetallicRoughnessTexture, u.uHasMetallicRoughnessTexture);
+          bindMaterialTexture(gl, prim.normalTexture, 2, u.uNormalTexture, u.uHasNormalTexture);
+          if (prim.normalTexture) gl.uniform1f(u.uNormalScale, prim.normalScale);
+          bindMaterialTexture(gl, prim.occlusionTexture, 3, u.uOcclusionTexture, u.uHasOcclusionTexture);
+          if (prim.occlusionTexture) gl.uniform1f(u.uOcclusionStrength, prim.occlusionStrength);
 
           gl.bindVertexArray(prim.vao);
           const instMats = mesh.instanceMatrices;
