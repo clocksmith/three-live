@@ -30,6 +30,7 @@ const model = (name: string) => ({gltf: {asset: {version: '2.0'}, extras: {name}
 function element() {
   const el: any = Object.create(ThreeLiveElement.prototype);
   el.currentModel = model('visible');
+  el.loadRevision = 0;
   el.isModelLoaded = true;
   el.getAttribute = () => null;
   el.hasAttribute = () => true;
@@ -54,6 +55,7 @@ async function main() {
     let signal: AbortSignal | undefined;
     globalThis.fetch = ((_url: unknown, options: any) => { signal = options.signal; return first.promise; }) as any;
     const old = el.loadModel('first.glb').then(() => null, (e: Error) => e);
+    assert(el.sceneRevision === 1, 'revision changes when fetch starts, before acceptance');
     const visible = el.currentModel;
     assert(el.currentModel === visible && el.isModelLoaded, 'fetch retains accepted model and loaded state');
     const next = model('new');
