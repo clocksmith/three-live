@@ -2535,11 +2535,7 @@ function resolveSandboxEngineSrc(): string {
   const src = getSandboxEngineSrc();
   if (!src) {
     throw new Error(
-      'Three-Live could not locate its own bundle URL, which the worker ' +
-        'sandbox needs in order to load the THREE runtime. Set it explicitly, ' +
-        "e.g. ThreeLiveElement.sandboxEngineSrc = new URL('three-live.min.js', " +
-        'import.meta.url).href. Refusing to execute the script, because ' +
-        'unsandboxed host-realm execution is prohibited.',
+      'Set ThreeLiveElement.sandboxEngineSrc to the IIFE three-live.min.js URL. Unsandboxed execution is prohibited.',
     );
   }
   if (!isAllowedSandboxEngineUrl(src)) {
@@ -2792,11 +2788,7 @@ function sandboxWorkerMain(
     nativeImportScripts(scriptUrlToLoad);
   } catch (err) {
     fail(
-      'Sandbox failed to load the Three-Live engine from "' +
-        ENGINE_SRC +
-        '". It must be a same-origin (or CORS-enabled) IIFE bundle such as ' +
-        // tslint:disable-next-line:no-any
-        'three-live.min.js. Underlying error: ' +
+      'Cannot import sandbox IIFE ' + ENGINE_SRC + ': ' +
         ((err && (err as any).message) || err),
     );
     return;
@@ -2805,11 +2797,7 @@ function sandboxWorkerMain(
   const THREE = scope.THREE;
   if (!THREE || typeof THREE.Scene !== 'function') {
     fail(
-      'Sandbox loaded "' +
-        ENGINE_SRC +
-        '" but it did not install a THREE ' +
-        'namespace. Point sandboxEngineSrc at an IIFE build (three-live.min.js), ' +
-        'not an ES module build.',
+      'No THREE from ' + ENGINE_SRC + '; use the IIFE three-live.min.js.',
     );
     return;
   }
@@ -2834,7 +2822,7 @@ function sandboxWorkerMain(
       !Object.prototype.hasOwnProperty.call(THREE, 'createAuthorFidelityCheck') ||
       typeof THREE.createAuthorFidelityCheck !== 'function'
     ) {
-      fail('FidelityError: The sandbox engine does not support strictFidelity.');
+      fail('FidelityError: sandbox engine lacks strictFidelity.');
       return;
     }
     checkFidelity = THREE.createAuthorFidelityCheck();
