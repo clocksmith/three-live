@@ -30,7 +30,7 @@ Native Android, iOS and visionOS behavior is unchanged.
 
 `GAUSSIAN_SPLAT_CAPABILITIES` describes the implementation explicitly:
 projected 3D covariance, instanced quads, DC-only color, three-sigma support,
-and a maximum 128-pixel major semi-axis. `getSplatLoader(viewer).getRenderStatus()`
+and a maximum 128-pixel major semi-axis. `getSplatRenderStatus(getSplatLoader(viewer))`
 reports counts of anisotropic, lite, pending and failed clouds. A failed
 anisotropic initialization is reported as failed, not as successful lite output.
 
