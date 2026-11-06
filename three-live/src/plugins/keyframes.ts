@@ -437,8 +437,9 @@ export const keyframeAnimationPlugin: ThreeLivePlugin & {
   crossFadeTo,
 
   onParseGLB(glbData: any): void {
-    if (!glbData.animations && glbData.gltf?.animations) {
+    if (glbData.animationsParsed === false || !glbData.animations) {
       glbData.animations = parseAnimations(glbData.gltf, glbData.bin);
+      glbData.animationsParsed = true;
     }
   },
 
