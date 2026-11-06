@@ -607,6 +607,30 @@ async function runElementTests() {
     'loadScriptFromSrc (Use Case 2) routes directly to sandbox executeUrl without requiring allowClientScripts',
   );
 
+  const fidelityCalls: Array<{kind: string; options: any}> = [];
+  ThreeLiveElement.registerScriptRunner({
+    async execute(_code, _sandbox, callbacks, options) {
+      fidelityCalls.push({kind: 'script', options});
+      callbacks.onError?.(new Error('fidelity test sentinel'));
+    },
+    async executeUrl(_url, _sandbox, callbacks, options) {
+      fidelityCalls.push({kind: 'url', options});
+      callbacks.onError?.(new Error('fidelity test sentinel'));
+    },
+  });
+  try {
+    await instance.executeScript('scene', {allowClientScripts: true, strictFidelity: true}).catch(() => {});
+    assert(fidelityCalls.length === 0, 'Fidelity options cannot bypass element script permission');
+    instance.allowClientScripts = true;
+    await instance.executeScript('scene', {strictFidelity: true}).catch(() => {});
+    instance.allowClientScripts = false;
+    await instance.loadScriptFromSrc('https://cdn.example.com/scene.js', {strictFidelity: true}).catch(() => {});
+    assert(fidelityCalls.length === 2 && fidelityCalls.every(call => call.options.strictFidelity === true),
+      'Both public element methods pass strict fidelity to the actual registered runner');
+    assert(fidelityCalls[0].options.allowClientScripts === true && !fidelityCalls[1].options.allowClientScripts,
+      'Client and URL fidelity paths retain separate execution permissions');
+  } finally { ThreeLiveElement.registerScriptRunner(authorScriptRunner); }
+
   // Test events dispatch
   let eventFired = false;
   let eventDetail: {meshName?: string; meshIndex?: number} | null = null;

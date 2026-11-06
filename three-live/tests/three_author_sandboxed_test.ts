@@ -1099,7 +1099,7 @@ async function runSandboxedAuthorTests() {
         if (payload instanceof ArrayBuffer) iframeModelReady = payload;
       },
       onError: (error) => iframeErrors.push(error),
-    });
+    }, {strictFidelity: true});
     for (const listener of Array.from(windowListeners)) {
       listener({
         source: mountedIframe!.contentWindow,
@@ -1138,6 +1138,11 @@ async function runSandboxedAuthorTests() {
     );
 
     const runNonce = String(mountedIframe!.contentWindow.posted[0]['nonce']);
+    assert(
+      String(mountedIframe!.contentWindow.posted[0]['workerSource'])
+        .includes('"strictFidelity":true'),
+      'Tier-2: execute forwards strictFidelity into the isolated iframe worker',
+    );
 
     // Act 2: Emit spoofed message from foreign source, then valid messages from iframe.contentWindow
     for (const listener of Array.from(windowListeners)) {
@@ -1193,7 +1198,7 @@ async function runSandboxedAuthorTests() {
         if (payload instanceof ArrayBuffer) urlModelReady = payload;
       },
       onError: (error) => iframeErrors.push(error),
-    });
+    }, {strictFidelity: true});
     for (const listener of Array.from(windowListeners)) {
       listener({
         source: mountedIframe!.contentWindow,
@@ -1201,6 +1206,11 @@ async function runSandboxedAuthorTests() {
       });
     }
     const urlPosted = mountedIframe!.contentWindow.posted[0];
+    assert(
+      String(urlPosted['workerSource']).includes('"strictFidelity":true') &&
+        String(urlPosted['workerSource']).includes('"allowClientScripts":false'),
+      'Tier-2: executeUrl forwards strictFidelity without enabling client scripts',
+    );
     const urlNonce = String(urlPosted['nonce']);
     for (const listener of Array.from(windowListeners)) {
       listener({

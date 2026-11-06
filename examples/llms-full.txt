@@ -1697,6 +1697,69 @@ resolved, sandboxed execution fails closed rather than falling back to the host
 realm. This mirrors how Monaco, PDF.js and Tesseract.js require their worker
 assets to be located.
 
+### Opt-in Authoring Fidelity Diagnostics
+
+The low-level browser `authorScriptRunner` supports `strictFidelity: true`
+for both `execute()` and `executeUrl()`, in either `worker` or `iframe` mode.
+The default remains permissive. Strict fidelity does not grant script execution
+permission or change the sandbox, URL validation, quotas, or watchdog.
+
+```js
+import {authorScriptRunner, setSandboxEngineSrc} from 'three-live/author';
+
+// Serve the matching IIFE engine bundle at this URL.
+setSandboxEngineSrc('/assets/three-live.min.js');
+
+const handle = await authorScriptRunner.execute(
+  'scene.add(new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial()));',
+  'worker',
+  {
+    onModelReady: (glb) => { /* consume validated output */ },
+    onError: (error) => console.error(error.message),
+  },
+  {allowClientScripts: true, strictFidelity: true},
+);
+// handle?.terminate() cancels an unfinished run.
+```
+
+For server-generated scripts, pass `{strictFidelity: true}` as the fourth
+argument to `authorScriptRunner.executeUrl(url, sandbox, callbacks, options)`.
+This does not require or enable `allowClientScripts`. The returned promise
+represents runner startup; worker execution failures arrive through `onError`.
+Update the sandbox engine bundle together with the host library: an older
+engine without the diagnostic hook is rejected when strict fidelity is requested.
+
+Strict mode rejects the known fallback paths that call `warnUnsupported`,
+including shader and geometry substitutions, approximate lights, unknown
+`THREE` symbols, and the static `requestAnimationFrame` shim. It also records
+two previously silent authoring losses without adding new default-mode warnings:
+
+- `MeshBasicMaterial`, `MeshLambertMaterial`, and `MeshPhongMaterial` use the
+  standard PBR material representation instead of their distinct shading models.
+- A `Mesh` constructed with multiple materials keeps only the first material.
+
+A rejection includes `FidelityError`, the last recorded feature, and its fallback
+in the error message. Constructing an unsupported object counts even if it is
+never added to the scene. Clearing `THREE.getAuthorWarnings()` via
+`THREE.clearAuthorWarnings()` cannot erase a loss already observed by the run.
+Trusted direct authoring callers can also use `createAuthorFidelityCheck()` to
+capture a synchronous check, perform authoring work, then call the returned
+function to reject losses observed since its creation.
+
+Strict runs withhold all scene messages until the synchronous script and its
+serialization finish successfully. Repeated `renderer.render()` calls retain
+only the first model and the last transform update, keeping buffering bounded.
+Default-mode streaming is unchanged. This is a diagnostic for instrumented
+fallbacks, not proof of complete Three.js compatibility, visual equivalence,
+asynchronous behavior, or Web/Android/iOS parity. Uninstrumented dropped
+properties, renderer differences, and export-format losses are not certified.
+The element methods also accept the option: `element.executeScript(code,
+{strictFidelity: true})` and `element.loadScriptFromSrc(url, {strictFidelity: true})`.
+Client scripts still require `allow-client-scripts`; an option cannot override that
+permission. Every emitted scene message is checked, including post-synchronous
+callbacks. Element attributes, automatic inline scripts, Rust/CLI/FFI entry points
+and native mobile SDKs do not expose this diagnostic.
+
 ### Supported Procedural Scripting Subset
 
 -   **Math & Core:** `Vector2`, `Vector3`, `Vector4`, `Euler`, `Quaternion`,
