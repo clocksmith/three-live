@@ -43,6 +43,11 @@
       "types": "./dist/xr-live-sim.d.ts",
       "import": "./dist/xr-live-sim.js",
       "require": "./dist/xr-live-sim.cjs"
+    },
+    "./gaussian": {
+      "types": "./dist/xr-live-gaussian.d.ts",
+      "import": "./dist/xr-live-gaussian.js",
+      "require": "./dist/xr-live-gaussian.cjs"
     }
   },
   "dependencies": {

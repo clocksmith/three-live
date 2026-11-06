@@ -119,6 +119,7 @@ export interface XRDepthShaderChunk {
 
 export interface SharedThreeLiveRegistry {
   plugins: ThreeLivePlugin[];
+  xrGaussianRenderer?: import('../../xr-live/src/plugins/splat-types').GaussianSplatRendererFactory;
   decoders: Map<string, any>;
   arProvider?: any;
   scriptRunner?: any;

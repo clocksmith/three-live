@@ -24,6 +24,8 @@
  * axis of each Gaussian).
  */
 
+import {getSharedRegistry} from '../../../three-live/src/plugin';
+import type {GaussianSplatRenderer, GaussianSplatRendererFactory} from './splat-types';
 import {createProgram} from '../../../three-live/src/gl-program';
 import {mat3NormalFromMat4, mat4Multiply} from '../../../three-live/src/math';
 import type {ThreeLivePlugin} from '../../../three-live/src/plugin';
@@ -786,6 +788,7 @@ export function computeSplatViewColors(
 
 interface SortedSplatView {
   readonly buffer: WebGLBuffer;
+  vao?: WebGLVertexArrayObject;
   readonly depth: Float32Array;
   age: number;
 }
@@ -804,11 +807,11 @@ function sameSplatDepth(a: Float32Array, b: Float32Array): boolean {
 }
 
 /** Exact depth rows share an order, including during the moving-view cooldown. */
-function createSplatSortCache(
+export function createSplatSortCache(
   gl: WebGL2RenderingContext,
   data: SplatData,
+  target: number = gl.ELEMENT_ARRAY_BUFFER,
 ) {
-  const target = gl.ELEMENT_ARRAY_BUFFER;
   let current: SplatEye | undefined;
   let previous: SplatEye | undefined;
   const orders: SortedSplatView[] = [];
@@ -861,6 +864,7 @@ function createSplatSortCache(
     },
     dispose(): void {
       for (const view of orders.splice(0)) {
+        if (view.vao) gl.deleteVertexArray(view.vao);
         gl.deleteBuffer(view.buffer);
       }
       current = previous = undefined;
@@ -1037,6 +1041,8 @@ export class SplatRenderer {
     gl.bindVertexArray(null);
   }
 
+  get ready(): boolean { return !!(this.program && this.vao); }
+
   /** Frees GPU resources. */
   dispose(): void {
     const gl = this.gl;
@@ -1051,8 +1057,10 @@ export class SplatRenderer {
 
 interface SplatEntry {
   readonly url: string;
-  renderer: SplatRenderer | null;
-  failed: boolean;
+  renderer: SplatRenderer | GaussianSplatRenderer | null;
+  readonly factory?: GaussianSplatRendererFactory;
+  readonly mode: 'anisotropic' | 'lite';
+  status: 'pending' | 'failed' | 'anisotropic' | 'lite';
 }
 
 /** Loads, caches, and renders `splatUrl` traits for one viewer. */
@@ -1069,6 +1077,9 @@ export class XRSplatLoader {
     const allowRemote = Boolean(
       viewer.container?.hasAttribute?.('allow-remote-splats'),
     );
+    const anisotropic = viewer.container?.getAttribute?.('splat-render-mode') === 'anisotropic';
+    const mode = anisotropic ? 'anisotropic' : 'lite';
+    const factory = anisotropic ? getSharedRegistry().xrGaussianRenderer : undefined;
     for (const mesh of meshes) {
       const raw = getMeshXRTraits(mesh)?.splatUrl;
       if (!raw) continue;
@@ -1076,19 +1087,27 @@ export class XRSplatLoader {
       if (!url || !mesh?.transform) continue;
       live.add(mesh);
       const existing = this.entries.get(mesh);
-      if (existing?.url === url) continue;
+      if (existing?.url === url && existing.mode === mode && existing.factory === factory) continue;
       existing?.renderer?.dispose();
-      const entry: SplatEntry = {url, renderer: null, failed: false};
+      const entry: SplatEntry = {url, mode, factory, renderer: null, status: 'pending'};
       this.entries.set(mesh, entry);
-      if (!gl) continue;
+      if (!gl || (anisotropic && !factory)) continue;
       loadSplat(url, this.fetchFn, allowRemote).then(
         (data) => {
-          if (this.entries.get(mesh) === entry) {
-            entry.renderer = new SplatRenderer(gl, data);
-          }
+          if (this.entries.get(mesh) !== entry) return;
+          try {
+            const renderer = factory ? factory.create(gl, data) : new SplatRenderer(gl, data);
+            if (!renderer.ready) {
+              renderer.dispose();
+              entry.status = 'failed';
+            } else {
+              entry.renderer = renderer;
+              entry.status = mode;
+            }
+          } catch { entry.status = 'failed'; }
         },
         () => {
-          entry.failed = true;
+          entry.status = 'failed';
         },
       );
     }
@@ -1097,6 +1116,12 @@ export class XRSplatLoader {
       entry.renderer?.dispose();
       this.entries.delete(mesh);
     }
+  }
+
+  getRenderStatus(): {anisotropic: number; lite: number; pending: number; failed: number} {
+    const status = {anisotropic: 0, lite: 0, pending: 0, failed: 0};
+    for (const entry of this.entries.values()) status[entry.status]++;
+    return status;
   }
 
   /** Draws every loaded splat cloud. */
@@ -1111,6 +1136,7 @@ export class XRSplatLoader {
     if (!gl || this.entries.size === 0) return;
     // Per-eye viewport and projection while presenting; desktop otherwise.
     const heightPx = viewport?.[3] ?? gl.drawingBufferHeight;
+    const widthPx = viewport?.[2] ?? gl.drawingBufferWidth;
     const focalPx =
       (((projection ?? resolveProjection(viewer))?.[5] ?? 1.7) * heightPx) / 2;
     const model = new Float32Array(16);
@@ -1136,7 +1162,11 @@ export class XRSplatLoader {
       const highQualitySH =
         traits?.splatQuality === 'high' ||
         viewer.container?.getAttribute?.('splat-quality') === 'high';
-      entry.renderer.draw(vp, model, focalPx, modelView, cameraPos, highQualitySH, eye);
+      if (entry.factory) {
+        (entry.renderer as GaussianSplatRenderer).draw(vp, model, widthPx, heightPx, eye);
+      } else {
+        (entry.renderer as SplatRenderer).draw(vp, model, focalPx, modelView, cameraPos, highQualitySH, eye);
+      }
     }
   }
 
@@ -1198,6 +1228,9 @@ export const splatLoaderPlugin: ThreeLivePlugin = {
     projection?: Float32Array,
   ): void {
     loaders.get(viewer)?.draw(viewer, vpMatrix, eye, viewport, projection);
+  },
+  onContextRestored(_gl: WebGL2RenderingContext, viewer: PluginViewer): void {
+    loaders.get(viewer)?.dispose();
   },
   onDestroy(_gl: WebGL2RenderingContext, viewer: PluginViewer): void {
     loaders.get(viewer)?.dispose();
