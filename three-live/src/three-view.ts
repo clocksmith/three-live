@@ -2170,8 +2170,6 @@ export class ThreeView {
    * an untrusted source such as the script sandbox.
    */
   loadGLBData(glbData: GLBData, limits?: HostSceneLimits): void {
-    this.lastGlbData = glbData;
-    this.lastLimits = limits;
     const {
       meshes,
       bounds,
@@ -2181,7 +2179,12 @@ export class ThreeView {
       gpuTextures,
       availableVariants,
     } = buildGpuScene(this.gl, glbData, limits, () => this.render());
+    this.lastGlbData = glbData;
+    this.lastLimits = limits;
     this.disposeMeshGpuResources();
+    this.currentClip = null;
+    this.isPlayingAnimation = false;
+    this.animationTime = 0;
     this.meshes = meshes;
     this.bounds = bounds;
     this.turntableRotation = 0;
@@ -2284,6 +2287,9 @@ export class ThreeView {
     this.animations = [];
     this.currentClip = null;
     this.isPlayingAnimation = false;
+    this.animationTime = 0;
+    this.lastGlbData = null;
+    for (const plugin of registeredPlugins) plugin.onClearScene?.(this);
     this.worldMatrices = [];
     this.gltf = null;
     this.initialNodeTransforms = [];
