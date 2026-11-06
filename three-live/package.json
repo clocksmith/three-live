@@ -81,6 +81,11 @@
       "types": "./dist/three-live-element.d.ts",
       "import": "./dist/three-live-element.js",
       "require": "./dist/three-live-element.cjs"
+    },
+    "./edits": {
+      "types": "./dist/three-live-edits.d.ts",
+      "import": "./dist/three-live-edits.js",
+      "require": "./dist/three-live-edits.cjs"
     }
   },
   "scripts": {
