@@ -95,6 +95,8 @@ export type SandboxMode = 'worker' | 'iframe';
 /** Options controlling procedural script execution security policy. */
 export interface ScriptExecutionOptions {
   readonly allowClientScripts?: boolean;
+  /** Reject known authoring degradations before publishing any scene output. */
+  readonly strictFidelity?: boolean;
 }
 
 export interface ScriptRunner {
@@ -108,6 +110,7 @@ export interface ScriptRunner {
     scriptUrl: string,
     sandbox: SandboxMode | string,
     callbacks: ScriptExecutionCallbacks,
+    options?: ScriptExecutionOptions,
   ): Promise<ScriptExecutionHandle | void>;
 }
 
@@ -1650,7 +1653,7 @@ export class ThreeLiveElement extends BaseElement {
    * Loads and compiles a server-generated Three.js scene script URL directly
    * inside the mandatory sandbox (Use Case 2).
    */
-  loadScriptFromSrc(src: string): Promise<ArrayBuffer | GLBData | void> {
+  loadScriptFromSrc(src: string, options?: ScriptExecutionOptions): Promise<ArrayBuffer | GLBData | void> {
     return this.runWithScriptRunner((runner, callbacks) => {
       if (typeof runner.executeUrl !== 'function') {
         const error = new Error(
@@ -1659,7 +1662,7 @@ export class ThreeLiveElement extends BaseElement {
         callbacks.onError?.(error);
         return Promise.reject(error);
       }
-      return runner.executeUrl(src, this.sandbox, callbacks);
+      return runner.executeUrl(src, this.sandbox, callbacks, {strictFidelity: options?.strictFidelity});
     });
   }
 
@@ -1668,7 +1671,7 @@ export class ThreeLiveElement extends BaseElement {
    * mandatory sandbox (Use Case 1). Requires opting in via
    * `ThreeLiveElement.allowClientScripts = true` or `allow-client-scripts`.
    */
-  executeScript(script: string): Promise<ArrayBuffer | GLBData | void> {
+  executeScript(script: string, options?: ScriptExecutionOptions): Promise<ArrayBuffer | GLBData | void> {
     if (!ThreeLiveElement.scriptRunner) {
       return this.runWithScriptRunner(() => Promise.resolve());
     }
@@ -1681,6 +1684,7 @@ export class ThreeLiveElement extends BaseElement {
     return this.runWithScriptRunner((runner, callbacks) =>
       runner.execute(script, this.sandbox, callbacks, {
         allowClientScripts: true,
+        strictFidelity: options?.strictFidelity,
       }),
     );
   }
