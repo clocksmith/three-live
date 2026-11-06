@@ -11,3 +11,14 @@ getSharedRegistry().xrGaussianRenderer = {
   create: (gl, data) => new AnisotropicSplatRenderer(gl, data),
 };
 export * from './plugins/gaussian-splat-renderer';
+
+/** Derive diagnostics from actual renderer state; omitted from default bundles. */
+export function getSplatRenderStatus(loader: import('./plugins/splat-loader').XRSplatLoader) {
+  const status = {anisotropic: 0, lite: 0, pending: 0, failed: 0};
+  for (const entry of loader.renderers) {
+    if (entry.failed) status.failed++;
+    else if (!entry.renderer) status.pending++;
+    else status[entry.mode]++;
+  }
+  return status;
+}

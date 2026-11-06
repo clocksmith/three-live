@@ -1,6 +1,7 @@
 /** Copyright 2026 Google LLC. SPDX-License-Identifier: Apache-2.0 */
 import {strict as assert} from 'node:assert';
 import {mat4Create} from '../../three-live/src/math';
+import {getSplatRenderStatus} from '../src/gaussian';
 import {getSharedRegistry} from '../../three-live/src/plugin';
 import {AnisotropicSplatRenderer, GAUSSIAN_SPLAT_CAPABILITIES, packGaussianSplats} from '../src/plugins/gaussian-splat-renderer';
 import {MAX_SPLATS, type SplatData, SplatRenderer, XRSplatLoader, sortSplatsByDepth} from '../src/plugins/splat-loader';
@@ -195,14 +196,14 @@ const fetchData=async()=>new Response(new Uint8Array(32));
 test('anisotropic opt-in waits for add-on without fetching or silently drawing lite',async()=>{
   const registry=getSharedRegistry(),saved=registry.xrGaussianRenderer;delete registry.xrGaussianRenderer;
   try {let calls=0;const loader=new XRSplatLoader((async()=>{calls++;return fetchData();}) as typeof fetch),v=viewer(mockGL());
-    loader.sync(v);await flush();assert.equal(calls,0);assert.deepEqual(loader.getRenderStatus(),{anisotropic:0,lite:0,pending:1,failed:0});
+    loader.sync(v);await flush();assert.equal(calls,0);assert.deepEqual(getSplatRenderStatus(loader),{anisotropic:0,lite:0,pending:1,failed:0});
     registry.xrGaussianRenderer={create:(gl,data)=>new AnisotropicSplatRenderer(gl,data)};
-    loader.sync(v);await flush();assert.equal(calls,1);assert.equal(loader.getRenderStatus().anisotropic,1);loader.dispose();
+    loader.sync(v);await flush();assert.equal(calls,1);assert.equal(getSplatRenderStatus(loader).anisotropic,1);loader.dispose();
   } finally {registry.xrGaussianRenderer=saved;}
 });
 test('default lite mode preserves original behavior even when the add-on is installed',async()=>{
   const registry=getSharedRegistry(),saved=registry.xrGaussianRenderer;registry.xrGaussianRenderer={create:()=>{throw Error('must not use add-on');}};
-  try {const loader=new XRSplatLoader(fetchData as typeof fetch);loader.sync(viewer(mockGL(),'lite'));await flush();assert.equal(loader.getRenderStatus().lite,1);loader.dispose();}
+  try {const loader=new XRSplatLoader(fetchData as typeof fetch);loader.sync(viewer(mockGL(),'lite'));await flush();assert.equal(getSplatRenderStatus(loader).lite,1);loader.dispose();}
   finally{registry.xrGaussianRenderer=saved;}
 });
 test('loader forwards per-eye viewport and reports renderer failure without fallback',async()=>{
@@ -211,7 +212,7 @@ test('loader forwards per-eye viewport and reports renderer failure without fall
     const loader=new XRSplatLoader(fetchData as typeof fetch),v=viewer(mockGL());loader.sync(v);await flush();loader.draw(v,vp(),'right',[100,0,300,400]);
     assert.deepEqual(args[0].slice(2),[300,400,'right']);loader.dispose();assert.equal(disposed,1);
     registry.xrGaussianRenderer={create:()=>({ready:false,draw(){},dispose:()=>disposed++})};
-    loader.sync(v);await flush();assert.equal(loader.getRenderStatus().failed,1);assert.equal(disposed,2);loader.dispose();
+    loader.sync(v);await flush();assert.equal(getSplatRenderStatus(loader).failed,1);assert.equal(disposed,2);loader.dispose();
   } finally {registry.xrGaussianRenderer=saved;}
 });
 test('lite loader forwards each eye to the per-eye sorting renderer',async()=>{
@@ -221,7 +222,7 @@ test('lite loader forwards each eye to the per-eye sorting renderer',async()=>{
   try {
     const loader=new XRSplatLoader(fetchData as typeof fetch),v=viewer(mockGL(),'lite');
     loader.sync(v);await flush();
-    assert.equal(loader.getRenderStatus().lite,1);
+    assert.equal(getSplatRenderStatus(loader).lite,1);
     loader.draw(v,vp(),'left');loader.draw(v,vp(),'right',[100,0,300,400]);
     assert.deepEqual(calls.map(args=>args[6]),['left','right']);
     loader.dispose();
@@ -230,7 +231,7 @@ test('lite loader forwards each eye to the per-eye sorting renderer',async()=>{
 test('loading removed cloud cannot create a stale renderer',async()=>{
   const registry=getSharedRegistry(),saved=registry.xrGaussianRenderer;let created=0,resolve!:(r:Response)=>void;
   registry.xrGaussianRenderer={create:()=>{created++;return{ready:true,draw(){},dispose(){}};}};
-  try{const loader=new XRSplatLoader((()=>new Promise(r=>resolve=r)) as typeof fetch),v=viewer(mockGL());loader.sync(v);v.meshes=[];loader.sync(v);resolve(await fetchData());await flush();assert.equal(created,0);assert.equal(loader.getRenderStatus().pending,0);}
+  try{const loader=new XRSplatLoader((()=>new Promise(r=>resolve=r)) as typeof fetch),v=viewer(mockGL());loader.sync(v);v.meshes=[];loader.sync(v);resolve(await fetchData());await flush();assert.equal(created,0);assert.equal(getSplatRenderStatus(loader).pending,0);}
   finally{registry.xrGaussianRenderer=saved;}
 });
 

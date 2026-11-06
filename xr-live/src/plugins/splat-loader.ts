@@ -1060,7 +1060,7 @@ interface SplatEntry {
   renderer: SplatRenderer | GaussianSplatRenderer | null;
   readonly factory?: GaussianSplatRendererFactory;
   readonly mode: 'anisotropic' | 'lite';
-  status: 'pending' | 'failed' | 'anisotropic' | 'lite';
+  failed: boolean;
 }
 
 /** Loads, caches, and renders `splatUrl` traits for one viewer. */
@@ -1089,7 +1089,7 @@ export class XRSplatLoader {
       const existing = this.entries.get(mesh);
       if (existing?.url === url && existing.mode === mode && existing.factory === factory) continue;
       existing?.renderer?.dispose();
-      const entry: SplatEntry = {url, mode, factory, renderer: null, status: 'pending'};
+      const entry: SplatEntry = {url, mode, factory, renderer: null, failed: false};
       this.entries.set(mesh, entry);
       if (!gl || (anisotropic && !factory)) continue;
       loadSplat(url, this.fetchFn, allowRemote).then(
@@ -1099,15 +1099,14 @@ export class XRSplatLoader {
             const renderer = factory ? factory.create(gl, data) : new SplatRenderer(gl, data);
             if (!renderer.ready) {
               renderer.dispose();
-              entry.status = 'failed';
+              entry.failed = true;
             } else {
               entry.renderer = renderer;
-              entry.status = mode;
             }
-          } catch { entry.status = 'failed'; }
+          } catch { entry.failed = true; }
         },
         () => {
-          entry.status = 'failed';
+          entry.failed = true;
         },
       );
     }
@@ -1118,11 +1117,8 @@ export class XRSplatLoader {
     }
   }
 
-  getRenderStatus(): {anisotropic: number; lite: number; pending: number; failed: number} {
-    const status = {anisotropic: 0, lite: 0, pending: 0, failed: 0};
-    for (const entry of this.entries.values()) status[entry.status]++;
-    return status;
-  }
+  /** Read-only inspection; formatting lives in the optional add-on. */
+  get renderers(): Iterable<Readonly<SplatEntry>> { return this.entries.values(); }
 
   /** Draws every loaded splat cloud. */
   draw(

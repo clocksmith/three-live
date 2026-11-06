@@ -21,3 +21,5 @@ export declare class AnisotropicSplatRenderer {
   draw(vp: Float32Array, model: Float32Array, width: number, height: number, eye?: string): void;
   dispose(): void;
 }
+
+export declare function getSplatRenderStatus(loader: {readonly renderers: Iterable<{readonly failed: boolean; readonly renderer: unknown; readonly mode: 'anisotropic' | 'lite'}>}): {anisotropic: number; lite: number; pending: number; failed: number};
