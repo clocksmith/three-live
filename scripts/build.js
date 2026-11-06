@@ -183,6 +183,13 @@ function buildTarget(options) {
 
 function buildThreeLive() {
   console.log('--> Building three-live...');
+  for (const [format, extension, globalName] of [['esm', 'js'], ['cjs', 'cjs'], ['iife', 'min.js', 'ThreeLiveEdits']]) {
+    buildTarget({entryPoints: [path.join(THREE_LIVE_DIR, 'src/edits.ts')], bundle: true,
+      format, globalName, minify: true, target: 'es2020',
+      outfile: path.join(THREE_LIVE_DIR, 'dist/three-live-edits.' + extension)});
+  }
+  fs.copyFileSync(path.join(THREE_LIVE_DIR, 'src/edits.d.ts'), path.join(THREE_LIVE_DIR, 'dist/three-live-edits.d.ts'));
+
   const tlDist = path.join(THREE_LIVE_DIR, 'dist');
 
   // 1. three-live standard (ESM, CJS, IIFE min)
