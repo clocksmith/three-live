@@ -173,6 +173,10 @@ function buildTarget(options) {
   if (options.minify && fs.existsSync(options.outfile)) {
     let code = fs.readFileSync(options.outfile, 'utf8');
     code = code.replace(WEBGL_REGEX, (_, _obj, prop) => String(WEBGL_CONSTANTS[prop]));
+    // Fold arithmetic exposed by enum substitution; keep the complete license.
+    code = esbuild
+      ? esbuild.transformSync(code, {minify: true, target: options.target, legalComments: 'inline'}).code
+      : execFileSync(ESBUILD_BIN, ['--minify', `--target=${options.target}`, '--legal-comments=inline'], {input: code, encoding: 'utf8'});
     fs.writeFileSync(options.outfile, code, 'utf8');
   }
 }
@@ -608,6 +612,13 @@ function buildThreeLive() {
 
 function buildXRLive() {
   console.log('--> Building xr-live...');
+  for (const [format, extension, globalName] of [['esm', 'js'], ['cjs', 'cjs'], ['iife', 'min.js', 'XRLiveGaussian']]) {
+    buildTarget({entryPoints: [path.join(XR_LIVE_DIR, 'src/gaussian.ts')], bundle: true,
+      format, globalName, minify: true, target: 'es2020',
+      outfile: path.join(XR_LIVE_DIR, 'dist/xr-live-gaussian.' + extension)});
+  }
+  fs.copyFileSync(path.join(XR_LIVE_DIR, 'src/gaussian.d.ts'), path.join(XR_LIVE_DIR, 'dist/xr-live-gaussian.d.ts'));
+
   const xrDist = path.join(XR_LIVE_DIR, 'dist');
 
   // 1. xr-live (Standard <xr-live> with Three.js authoring)
@@ -793,6 +804,8 @@ function buildXRLive() {
       path.join(xrDist, 'xr-live-sim.min.js'),
       path.join(DIST_DIR, 'xr-live-sim.min.js'));
 
+  fs.copyFileSync(path.join(XR_LIVE_DIR, 'dist/xr-live-gaussian.min.js'), path.join(DIST_DIR, 'xr-live-gaussian.min.js'));
+
   const sandboxHtmlSrc =
       path.join(THREE_LIVE_DIR, 'src/three-live-sandbox.html');
   fs.copyFileSync(sandboxHtmlSrc, path.join(xrDist, 'three-live-sandbox.html'));
@@ -868,6 +881,7 @@ function reportSizes() {
     {name: 'xr-live-spatial.min.js', budgetKb: '57'},
     {name: 'xr-live-sim.min.js', budgetKb: '22'},
     {name: 'xr-live-full.min.js', budgetKb: '184'},
+    {name: 'xr-live-gaussian.min.js', budgetKb: '8'},
   ];
   const failures = [];
   for (const f of files) {
