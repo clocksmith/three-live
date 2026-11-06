@@ -334,8 +334,13 @@ export class ThreeLiveElement extends BaseElement {
 
   private scriptHandle: ScriptExecutionHandle | null = null;
   private loadController: AbortController | null = null;
+  private loadRevision = 0;
+
+  /** Changes when any load starts, including loads that later fail or abort. */
+  public get sceneRevision(): number { return this.loadRevision; }
 
   private beginLoad(): AbortController {
+    this.loadRevision++;
     const previous = this.loadController;
     const handle = this.scriptHandle;
     const current = new AbortController();
