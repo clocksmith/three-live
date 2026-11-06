@@ -3846,54 +3846,26 @@ export class ThreeView {
       const rightVecZ = -Math.sin(this.currTheta);
       const halfIpd = 0.032;
 
-      const leftProj = mat4Create();
-      const leftView = mat4Create();
-      const leftEye: [number, number, number] = [
-        baseEyeX - rightVecX * halfIpd,
-        baseEyeY,
-        baseEyeZ - rightVecZ * halfIpd,
-      ];
-      const leftTarget: [number, number, number] = [
-        c[0] - rightVecX * halfIpd * 0.25,
-        c[1],
-        c[2] - rightVecZ * halfIpd * 0.25,
-      ];
-      mat4Perspective(leftProj, this.fov, halfW / fullH, 0.1, farPlane);
-      mat4LookAt(leftView, leftEye, leftTarget, [0, 1, 0]);
-
-      const rightProj = mat4Create();
-      const rightView = mat4Create();
-      const rightEye: [number, number, number] = [
-        baseEyeX + rightVecX * halfIpd,
-        baseEyeY,
-        baseEyeZ + rightVecZ * halfIpd,
-      ];
-      const rightTarget: [number, number, number] = [
-        c[0] + rightVecX * halfIpd * 0.25,
-        c[1],
-        c[2] + rightVecZ * halfIpd * 0.25,
-      ];
-      mat4Perspective(rightProj, this.fov, rightW / fullH, 0.1, farPlane);
-      mat4LookAt(rightView, rightEye, rightTarget, [0, 1, 0]);
-
-      this.render({
-        viewMatrix: leftView,
-        projMatrix: leftProj,
-        eyePos: leftEye,
-        viewport: [0, 0, halfW, fullH],
-        eye: 'left',
-        clear: true,
-        isAR: false,
-      });
-      this.render({
-        viewMatrix: rightView,
-        projMatrix: rightProj,
-        eyePos: rightEye,
-        viewport: [halfW, 0, rightW, fullH],
-        eye: 'right',
-        clear: false,
-        isAR: false,
-      });
+      for (let i = 0; i < 2; i++) {
+        const direction = i ? 1 : -1;
+        const width = i ? rightW : halfW;
+        const projection = mat4Create(), view = mat4Create();
+        const eye: [number, number, number] = [
+          baseEyeX + direction * rightVecX * halfIpd,
+          baseEyeY,
+          baseEyeZ + direction * rightVecZ * halfIpd,
+        ];
+        const target: [number, number, number] = [
+          c[0] + direction * rightVecX * halfIpd * 0.25,
+          c[1],
+          c[2] + direction * rightVecZ * halfIpd * 0.25,
+        ];
+        mat4Perspective(projection, this.fov, width / fullH, 0.1, farPlane);
+        mat4LookAt(view, eye, target, [0, 1, 0]);
+        this.render({viewMatrix: view, projMatrix: projection, eyePos: eye,
+          viewport: [i ? halfW : 0, 0, width, fullH], eye: i ? 'right' : 'left',
+          clear: i === 0, isAR: false});
+      }
       this.gl.viewport(0, 0, fullW, fullH);
       return;
     }
