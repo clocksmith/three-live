@@ -215,7 +215,7 @@ async function runTests() {
 
   const stale = bootWorker({strictFidelity: true}, staleEngine);
   assert(stale.posted.length === 1 &&
-    stale.posted[0].message?.includes('does not support strictFidelity') === true,
+    stale.posted[0].type === 'ERROR' && /^FidelityError:.*strictFidelity/.test(stale.posted[0].message || ''),
     'Stale permissive engine fails clearly instead of treating a no-op proxy as a check');
 
   const urlRun = bootWorker({strictFidelity: true, allowedScriptUrl: SCRIPT_URL}, THREE,
