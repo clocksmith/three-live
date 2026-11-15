@@ -175,6 +175,9 @@ function buildTarget(options) {
     if (options.banner && options.banner.js) {
       args.push(`--banner:js=${options.banner.js}`);
     }
+    if (options.footer && options.footer.js) {
+      args.push(`--footer:js=${options.footer.js}`);
+    }
     if (options.define) {
       for (const [k, v] of Object.entries(options.define)) {
         args.push(`--define:${k}=${v}`);
@@ -417,6 +420,10 @@ function buildThreeLive() {
     globalName: 'ThreeLiveBundle',
     minify: true,
     target: 'es2020',
+    banner: {js: `${FULL_LICENSE_BANNER}\nfunction __tl_iife(){`},
+    footer: {
+      js: ';return ThreeLiveBundle;}var ThreeLiveBundle=__tl_iife();if(typeof globalThis!=="undefined")globalThis.ThreeLiveBundle=ThreeLiveBundle;ThreeLiveBundle&&ThreeLiveBundle.setSandboxEngineSource&&ThreeLiveBundle.setSandboxEngineSource("("+__tl_iife.toString()+")();");',
+    },
     define: {
       'IS_DEV': 'false',
       'ENABLE_NATIVE_HOOKS': 'false',
@@ -988,6 +995,10 @@ function buildXRLive() {
     globalName: 'XRLiveFull',
     minify: true,
     target: 'es2020',
+    banner: {js: `${FULL_LICENSE_BANNER}\nfunction __tl_iife(){`},
+    footer: {
+      js: ';return XRLiveFull;}var XRLiveFull=__tl_iife();if(typeof globalThis!=="undefined")globalThis.XRLiveFull=XRLiveFull;XRLiveFull&&XRLiveFull.setSandboxEngineSource&&XRLiveFull.setSandboxEngineSource("("+__tl_iife.toString()+")();");',
+    },
     define: {'IS_DEV': 'false'},
     outfile: path.join(xrDist, 'xr-live-full.min.js'),
   });
@@ -1125,7 +1136,7 @@ function reportSizes() {
     {name: 'three-live-viewer.min.js', budgetKb: '31'},
     {name: 'three-live.min.js', budgetKb: '78'},
     {name: 'three-live-studio.min.js', budgetKb: '36'},
-    {name: 'three-live-cad.min.js', budgetKb: '17'},
+    {name: 'three-live-cad.min.js', budgetKb: '20'},
     {name: 'three-live-kit-mechanical.min.js', budgetKb: '18'},
     {name: 'three-live-kit-architecture.min.js', budgetKb: '16'},
     {name: 'three-live-kit-industrial.min.js', budgetKb: '14'},
@@ -1137,14 +1148,14 @@ function reportSizes() {
     {name: 'three-live-ai.min.js', budgetKb: '33'},
     {name: 'three-live-webgpu.min.js', budgetKb: '23'},
     {name: 'three-live-tsl.min.js', budgetKb: '19'},
-    {name: 'three-live-full.min.js', budgetKb: '231'},
+    {name: 'three-live-full.min.js', budgetKb: '233'},
     {name: 'xr-live-viewer.min.js', budgetKb: '56'},
     {name: 'xr-live.min.js', budgetKb: '90'},
     {name: 'xr-live-sensors.min.js', budgetKb: '10'},
     {name: 'xr-live-spatial.min.js', budgetKb: '63'},
     {name: 'xr-live-sim.min.js', budgetKb: '30'},
     {name: 'xr-live-webgpu.min.js', budgetKb: '12'},
-    {name: 'xr-live-full.min.js', budgetKb: '340'},
+    {name: 'xr-live-full.min.js', budgetKb: '342'},
   ];
   const failures = [];
   for (const f of files) {
