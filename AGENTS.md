@@ -16,6 +16,9 @@ limitations under the License.
 
 # AGENTS.md — Three-Live & XR-Live Guide for Coding Agents
 
+When working inside Deco, follow [the workspace operating rules](../AGENTS.md).
+This file adds repository-specific guidance; standalone checkouts use it directly.
+
 This file provides high-signal context, architectural invariants, and authoring rules for AI coding assistants working in or building with the `three-live` repository.
 
 - **Building 3D / XR scenes or apps?** Read [`skills/three-live-authoring/SKILL.md`](skills/three-live-authoring/SKILL.md) and [`docs/llm-guide.md`](docs/llm-guide.md).
@@ -187,7 +190,9 @@ Every procedural scene and `userData.xr` trait runs across **Web**, **Android**,
 
 ## 4. Build, Test & Verification Commands
 
-Run from the repository root:
+Choose the command for the changed surface; this is a command reference, not a
+requirement to run every suite before editing, committing or pushing. Run from
+the repository root:
 
 ```bash
 # 1. Build all Web bundles + embedded Rust engine asset and verify size budgets
