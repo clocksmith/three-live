@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Optional MediaPipe Hand Landmarker adapter for three-live. The core `:mobile:android` library
-// stays zero-dependency; phone/tablet apps opt in by adding this module and calling
+// Optional MediaPipe Hand Landmarker adapter for three-live. The core `:mobile:android-runtime`
+// library stays zero-dependency; phone/tablet apps opt in by adding this module and calling
 // ThreeLiveMediaPipeHands.install(handLandmarker).
 
 plugins {
@@ -47,7 +47,7 @@ android {
 }
 
 dependencies {
-  api(project(":mobile:android"))
+  api(project(":mobile:android-runtime"))
   api("com.google.mediapipe:tasks-vision:0.10.14")
 
   testImplementation("junit:junit:4.13.2")

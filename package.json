@@ -70,6 +70,13 @@
       "import": "./three-live/dist/three-author.js",
       "require": "./three-live/dist/three-author.cjs"
     },
+    "./compiler-bundle": {
+      "types": "./three-live/dist/three-live-compiler-bundle.d.ts",
+      "import": "./three-live/dist/three-live-compiler-bundle.js",
+      "require": "./three-live/dist/three-live-compiler-bundle.cjs"
+    },
+    "./compiler-bundle.min.js": "./three-live/dist/three-live-compiler-bundle.min.js",
+    "./engine-requirements.json": "./three-live/dist/engine-requirements.json",
     "./xr": {
       "types": "./three-live/dist/three-xr.d.ts",
       "import": "./three-live/dist/three-xr.js",

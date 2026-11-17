@@ -67,6 +67,8 @@ android {
 }
 
 dependencies {
+  api(project(":mobile:android-runtime"))
+
   // Keep in sync with mobile/examples/android_compose/build.gradle.kts: Gradle resolves a single
   // version across the composite build, so a skew here means the library is never exercised
   // against the version it actually ships with.

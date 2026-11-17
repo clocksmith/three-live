@@ -142,7 +142,7 @@ android {
 }
 
 dependencies {
-  api(project(":mobile:android"))
+  api(project(":mobile:android-runtime"))
 
   // Keep in sync with mobile/examples/android_compose/build.gradle.kts.
   api("com.google.android.filament:filament-android:$filamentVersion")
