@@ -666,6 +666,24 @@ function buildThreeLive() {
     outfile: path.join(tlDist, 'three-live-ai.min.js'),
   });
 
+  // 10e. three-live-edits (ESM, CJS, IIFE min): a la carte sub-node editing & constraint receipts
+  for (const [format, ext, globalName] of [
+    ['esm', 'js', undefined],
+    ['cjs', 'cjs', undefined],
+    ['iife', 'min.js', 'ThreeLiveEdits'],
+  ]) {
+    buildTarget({
+      entryPoints: [path.join(THREE_LIVE_DIR, 'src/edits.ts')],
+      bundle: true,
+      format,
+      globalName,
+      minify: true,
+      target: 'es2020',
+      define: {'IS_DEV': 'false'},
+      outfile: path.join(tlDist, `three-live-edits.${ext}`),
+    });
+  }
+
   // 11. three-live-animation (ESM, CJS, IIFE min)
   buildTarget({
     entryPoints: [path.join(THREE_LIVE_DIR, 'src/animation.ts')],
@@ -841,6 +859,9 @@ function buildThreeLive() {
   fs.copyFileSync(
       path.join(tlDist, 'three-live-ai.min.js'),
       path.join(DIST_DIR, 'three-live-ai.min.js'));
+  fs.copyFileSync(
+      path.join(tlDist, 'three-live-edits.min.js'),
+      path.join(DIST_DIR, 'three-live-edits.min.js'));
   fs.copyFileSync(
       path.join(tlDist, 'three-live-webgpu.min.js'),
       path.join(DIST_DIR, 'three-live-webgpu.min.js'));
@@ -1238,6 +1259,7 @@ function reportSizes() {
     {name: 'three-live-procedural.min.js', budgetKb: '30'},
     {name: 'three-live-animation.min.js', budgetKb: '11'},
     {name: 'three-live-ai.min.js', budgetKb: '35'},
+    {name: 'three-live-edits.min.js', budgetKb: '8'},
     {name: 'three-live-webgpu.min.js', budgetKb: '23'},
     {name: 'three-live-tsl.min.js', budgetKb: '19'},
     {name: 'three-live-full.min.js', budgetKb: '242'},
