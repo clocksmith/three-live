@@ -2267,7 +2267,7 @@ export class Material {
   public opacity: number;
   public transparent: boolean;
   public wireframe: boolean;
-  public visible?: boolean;
+  public visible: boolean;
   public side: number; // 0 = FrontSide, 1 = BackSide, 2 = DoubleSide
   public get doubleSided(): boolean {
     return this.side === 2;
@@ -2314,6 +2314,7 @@ export class Material {
     this.opacity = numberOr(params.opacity, 1);
     this.transparent = booleanOr(params.transparent, false);
     this.wireframe = booleanOr(params.wireframe, false);
+    this.visible = booleanOr(params.visible, true);
     this.side = numberOr(params.side, params.doubleSided === false ? 0 : 2);
     if (params.doubleSided !== undefined && params.side === undefined) {
       this.side = params.doubleSided ? 2 : 0;
@@ -6131,7 +6132,7 @@ if (typeof ENABLE_SERVER_EXTRACT !== 'undefined' && ENABLE_SERVER_EXTRACT) {
           }
         } else {
           const rawMat = isMatArray ? matField[0] : matField;
-          if (!isMatArray || rawMat) {
+          if (!(isMatArray && !rawMat) && rawMat?.visible !== false) {
             primaryMatIdx = getMaterialIndex(
               rawMat instanceof Material ? rawMat : null,
             );
@@ -6193,12 +6194,11 @@ if (typeof ENABLE_SERVER_EXTRACT !== 'undefined' && ENABLE_SERVER_EXTRACT) {
           }
           let rawColors: Float32Array | null = null;
           const colAttr = geo.attributes.color;
+          const cStep = colAttr?.itemSize === 4 ? 4 : 3;
           if (
-            colAttr &&
-            colAttr.array &&
+            colAttr?.array &&
             colAttr.count >= posAttr.count &&
-            colAttr.array.length >=
-              posAttr.count * (colAttr.itemSize === 4 ? 4 : 3)
+            colAttr.array.length >= posAttr.count * cStep
           ) {
             let exportColor = false;
             for (let gi = 0; gi < activeMats.length; gi++) {
@@ -6220,7 +6220,6 @@ if (typeof ENABLE_SERVER_EXTRACT !== 'undefined' && ENABLE_SERVER_EXTRACT) {
             }
             if (exportColor) {
               const cSrc = colAttr.array as ArrayLike<number>;
-              const cStep = colAttr.itemSize === 4 ? 4 : 3;
               const cNorm =
                 cSrc instanceof Uint8Array
                   ? 1 / 255
@@ -6231,12 +6230,10 @@ if (typeof ENABLE_SERVER_EXTRACT !== 'undefined' && ENABLE_SERVER_EXTRACT) {
               for (let i = 0; i < posAttr.count; i++) {
                 const si = i * cStep;
                 const di = i * 3;
-                const r = cSrc[si]! * cNorm;
-                const g = cSrc[si + 1]! * cNorm;
-                const b = cSrc[si + 2]! * cNorm;
-                rawColors[di] = Number.isFinite(r) ? Math.max(0, r) : 1;
-                rawColors[di + 1] = Number.isFinite(g) ? Math.max(0, g) : 1;
-                rawColors[di + 2] = Number.isFinite(b) ? Math.max(0, b) : 1;
+                for (let k = 0; k < 3; k++) {
+                  const v = cSrc[si + k]! * cNorm;
+                  rawColors[di + k] = Number.isFinite(v) ? Math.max(0, v) : 1;
+                }
               }
             }
           }

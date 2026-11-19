@@ -1433,41 +1433,51 @@ function serializeScene(
           material?: number;
           extensions?: Record<string, unknown>;
         };
-        const baseAttributes: Record<string, number> = {
-          POSITION: addAccessor(
-            posArr,
-            'VEC3',
-            34962,
-            5126,
-            vertexCount,
-            min,
-            max,
-          ),
-        };
-        const addFloatAttr = (
-          attr: {array?: unknown; count?: number} | undefined,
-          name: string,
-          comps: number,
-        ) => {
-          if (attr?.array !== undefined) {
-            assertFloatAttr(attr.array);
-            const cnt = Math.min(
-              (attr.count ?? 0) | 0,
-              ((attr.array as ArrayLike<number>).length / comps) | 0,
-            );
-            if (cnt >= vertexCount) {
-              baseAttributes[name] = addAccessor(
-                sanitizeF32(attr.array, vertexCount, comps),
-                comps === 2 ? 'VEC2' : 'VEC3',
-                34962,
-                5126,
-                vertexCount,
+        if (geo.attributes.normal?.array !== undefined) {
+          assertFloatAttr(geo.attributes.normal.array);
+        }
+        if (geo.attributes.uv?.array !== undefined) {
+          assertFloatAttr(geo.attributes.uv.array);
+        }
+        let baseAttributes: Record<string, number> | null = null;
+        const ensureBaseAttributes = (): Record<string, number> => {
+          if (baseAttributes) return baseAttributes;
+          baseAttributes = {
+            POSITION: addAccessor(
+              posArr,
+              'VEC3',
+              34962,
+              5126,
+              vertexCount,
+              min,
+              max,
+            ),
+          };
+          const addFloatAttr = (
+            attr: {array?: unknown; count?: number} | undefined,
+            name: string,
+            comps: number,
+          ) => {
+            if (attr?.array !== undefined) {
+              const cnt = Math.min(
+                (attr.count ?? 0) | 0,
+                ((attr.array as ArrayLike<number>).length / comps) | 0,
               );
+              if (cnt >= vertexCount) {
+                baseAttributes![name] = addAccessor(
+                  sanitizeF32(attr.array, vertexCount, comps),
+                  comps === 2 ? 'VEC2' : 'VEC3',
+                  34962,
+                  5126,
+                  vertexCount,
+                );
+              }
             }
-          }
+          };
+          addFloatAttr(geo.attributes.normal, 'NORMAL', 3);
+          addFloatAttr(geo.attributes.uv, 'TEXCOORD_0', 2);
+          return baseAttributes;
         };
-        addFloatAttr(geo.attributes.normal, 'NORMAL', 3);
-        addFloatAttr(geo.attributes.uv, 'TEXCOORD_0', 2);
 
         const hasIndices = Boolean(
           geo.index && geo.index.array && Math.floor(geo.index.count) > 0,
@@ -1592,7 +1602,7 @@ function serializeScene(
         const buildPrimAttributes = (
           matRef: Material | null | undefined,
         ): Record<string, number> => {
-          const attrs = {...baseAttributes};
+          const attrs = {...ensureBaseAttributes()};
           if (canExportColors) {
             const m = matRef as
               | (Material & {vertexColors?: boolean; map?: unknown})
@@ -1703,6 +1713,7 @@ function serializeScene(
 
         const maybeInst = obj as Partial<InstancedMesh>;
         if (
+          primitives.length > 0 &&
           maybeInst.isInstancedMesh &&
           typeof maybeInst.count === 'number' &&
           maybeInst.count > 0 &&

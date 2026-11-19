@@ -932,6 +932,54 @@ async function runTests() {
       customGeo.groups.length === 0,
       'BufferGeometry.clearGroups() clears explicit groups',
     );
+
+    // Material({ visible: false }) constructor + single- vs multi-material visibility parity
+    const ctorHidden = new MeshStandardMaterial({color: 0xff0000, visible: false});
+    const ctorVisible = new MeshStandardMaterial({color: 0x00ff00});
+    assert(
+      ctorHidden.visible === false && ctorVisible.visible === true,
+      'Material constructor initializes visible from params (default true)',
+    );
+    const singleHiddenScene = new Scene();
+    singleHiddenScene.add(new Mesh(new BoxGeometry(1, 1, 1), ctorHidden));
+    const singleHiddenGltf = sceneToCanvas3D(singleHiddenScene).gltf;
+    assert(
+      !singleHiddenGltf.meshes &&
+        !singleHiddenGltf.materials &&
+        !singleHiddenGltf.accessors &&
+        singleHiddenGltf.nodes?.length === 1 &&
+        singleHiddenGltf.nodes[0].mesh === undefined,
+      'Single-material Mesh with Material({visible: false}) omits mesh, materials, and orphaned accessors',
+    );
+    const partialHiddenScene = new Scene();
+    partialHiddenScene.add(
+      new Mesh(new BoxGeometry(1, 1, 1), [
+        new MeshStandardMaterial({color: 0xff0000, visible: false}),
+        new MeshStandardMaterial({color: 0x00ff00}),
+        new MeshStandardMaterial({color: 0x0000ff, visible: false}),
+        new MeshStandardMaterial({color: 0xffff00}),
+        new MeshStandardMaterial({color: 0x00ffff}),
+        new MeshStandardMaterial({color: 0xff00ff}),
+      ]),
+    );
+    const partialHiddenGltf = sceneToCanvas3D(partialHiddenScene).gltf;
+    assert(
+      partialHiddenGltf.meshes[0].primitives.length === 4 &&
+        partialHiddenGltf.materials.length === 4,
+      'Multi-material BoxGeometry omits groups whose Material({visible: false}) was set via constructor',
+    );
+    const allHiddenScene = new Scene();
+    allHiddenScene.add(
+      new Mesh(
+        new BoxGeometry(1, 1, 1),
+        Array.from({length: 6}, () => new MeshStandardMaterial({visible: false})),
+      ),
+    );
+    const allHiddenGltf = sceneToCanvas3D(allHiddenScene).gltf;
+    assert(
+      !allHiddenGltf.meshes && !allHiddenGltf.accessors,
+      'Multi-material BoxGeometry with all 6 faces {visible: false} omits mesh and accessors',
+    );
   }
 
   // Summary

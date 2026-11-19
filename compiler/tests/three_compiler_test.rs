@@ -6150,3 +6150,69 @@ fn test_multi_material_box_mixed_vertex_colors_parity() {
         }
     }
 }
+
+#[test]
+fn test_material_visibility_constructor_and_single_vs_multi_parity() {
+    use three_live_compiler::{read_glb, ThreeEngine};
+
+    let mut engine = ThreeEngine::new().expect("ThreeEngine::new");
+
+    // 1. Single-material mesh with `material.visible = false` and `new MeshStandardMaterial({ visible: false })`
+    for script in [
+        r#"
+            const mat = new THREE.MeshStandardMaterial({ color: 0xff0000 });
+            mat.visible = false;
+            scene.add(new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), mat));
+        "#,
+        r#"
+            const mat = new THREE.MeshStandardMaterial({ color: 0xff0000, visible: false });
+            scene.add(new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), mat));
+        "#,
+        r#"
+            const mats = Array.from({ length: 6 }, () => new THREE.MeshStandardMaterial({ visible: false }));
+            scene.add(new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), mats));
+        "#,
+    ] {
+        let raw_scene = engine.execute(script).expect("execute hidden material");
+        assert_eq!(
+            raw_scene.meshes.len(),
+            0,
+            "Hidden material must omit mesh in native raw extractor: {script}"
+        );
+        assert_eq!(raw_scene.nodes.len(), 1);
+        assert!(raw_scene.nodes[0].mesh.is_none());
+
+        let glb_bytes = engine.compile_glb(script).expect("compile_glb hidden material");
+        let glb_scene = read_glb(&glb_bytes).expect("read_glb hidden material");
+        assert_eq!(
+            glb_scene.meshes.len(),
+            0,
+            "Hidden material must omit mesh in GLB export: {script}"
+        );
+    }
+
+    // 2. Six-material box with constructor `{ visible: false }` on 2 faces emits 4 groups / 4 primitives
+    let partial_script = r#"
+        const box = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), [
+            new THREE.MeshStandardMaterial({ color: 0xff0000, visible: false }),
+            new THREE.MeshStandardMaterial({ color: 0x00ff00 }),
+            new THREE.MeshStandardMaterial({ color: 0x0000ff, visible: false }),
+            new THREE.MeshStandardMaterial({ color: 0xffff00 }),
+            new THREE.MeshStandardMaterial({ color: 0x00ffff }),
+            new THREE.MeshStandardMaterial({ color: 0xff00ff }),
+        ]);
+        scene.add(box);
+    "#;
+    let raw_partial = engine.execute(partial_script).expect("execute partial hidden");
+    assert_eq!(raw_partial.meshes.len(), 1);
+    assert_eq!(raw_partial.meshes[0].groups.len(), 4);
+    assert_eq!(raw_partial.materials.len(), 4);
+
+    let glb_partial =
+        read_glb(&engine.compile_glb(partial_script).expect("compile_glb partial hidden"))
+            .expect("read_glb partial hidden");
+    assert_eq!(glb_partial.meshes.len(), 1);
+    assert_eq!(glb_partial.meshes[0].groups.len(), 4);
+    assert_eq!(glb_partial.meshes[0].indices.len(), 24);
+    assert_eq!(glb_partial.materials.len(), 4);
+}

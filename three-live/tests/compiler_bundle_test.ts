@@ -574,6 +574,47 @@ console.log('=== Running Hosted Compiler Bundle & AI Protocol Tests ===');
         const mGltf = JSON.parse(ThreeEngine.pureJsUtf8Decode(mixedGlb.subarray(20, 20 + mjLen)));
         const mixedGlbColorMask = mGltf.meshes[0].primitives.map((p) => p.attributes.COLOR_0 !== undefined);
 
+        // Material visibility parity across raw extractor and compileToGLB (both property & constructor)
+        const visCases = [
+          {
+            code: "const m = new THREE.MeshStandardMaterial({ color: 0xff0000 }); m.visible = false; scene.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), m));",
+            rawFn: () => {
+              const m = new THREE.MeshStandardMaterial({ color: 0xff0000 });
+              m.visible = false;
+              scene.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), m));
+            },
+            wantMeshes: 0,
+            wantPrims: 0,
+          },
+          {
+            code: "scene.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial({ color: 0xff0000, visible: false })));",
+            rawFn: () => {
+              scene.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial({ color: 0xff0000, visible: false })));
+            },
+            wantMeshes: 0,
+            wantPrims: 0,
+          },
+          {
+            code: "scene.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), Array.from({ length: 6 }, (_, i) => new THREE.MeshStandardMaterial({ visible: i % 2 === 0 }))));",
+            rawFn: () => {
+              scene.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), Array.from({ length: 6 }, (_, i) => new THREE.MeshStandardMaterial({ visible: i % 2 === 0 }))));
+            },
+            wantMeshes: 1,
+            wantPrims: 3,
+          },
+        ];
+        const visParityOk = visCases.every((tc) => {
+          globalThis.scene = new THREE.Scene();
+          tc.rawFn();
+          const r = globalThis.__three_live_extract_scene_raw__();
+          const gBytes = ThreeEngine.compileToGLB(tc.code);
+          const gjLen = new DataView(gBytes.buffer, gBytes.byteOffset, gBytes.byteLength).getUint32(12, true);
+          const gJson = JSON.parse(ThreeEngine.pureJsUtf8Decode(gBytes.subarray(20, 20 + gjLen)));
+          const rPrims = r.meshes.length === 0 ? 0 : (r.meshes[0].raw_groups ? r.meshes[0].raw_groups.length / 4 : 1);
+          const gPrims = gJson.meshes ? gJson.meshes[0].primitives.length : 0;
+          return r.meshes.length === tc.wantMeshes && (gJson.meshes ? gJson.meshes.length : 0) === tc.wantMeshes && rPrims === tc.wantPrims && gPrims === tc.wantPrims;
+        });
+
         return {
           matCount: raw.materials.length,
           meshCount: raw.meshes.length,
@@ -586,6 +627,7 @@ console.log('=== Running Hosted Compiler Bundle & AI Protocol Tests ===');
           singleExplicitRawGroupsNull: singleRaw.meshes[0].raw_groups === null && singleRaw.meshes[0].raw_indices.length === 36,
           mixedVcFlags,
           mixedGlbColorMask,
+          visParityOk,
         };
       })()`,
       realm,
@@ -618,6 +660,10 @@ console.log('=== Running Hosted Compiler Bundle & AI Protocol Tests ===');
         JSON.stringify(sixColorCheck.mixedGlbColorMask) ===
           JSON.stringify([true, false, false, false, true, false]),
       'Per-group vertexColors flags in __three_live_extract_scene_raw__ match web COLOR_0 primitive bindings',
+    );
+    assert(
+      sixColorCheck.visParityOk === true,
+      'Material visibility (material.visible = false and Material({visible: false})) matches across raw extractor and compileToGLB',
     );
   }
 }
