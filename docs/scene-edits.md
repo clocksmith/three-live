@@ -17,7 +17,7 @@ limitations under the License.
 # Targeted Sub-Node Scene Editing (`three-live/edits`)
 
 `three-live/edits` (`dist/three-live-edits.min.js`) is an optional, a la carte
-host add-on (`< 8 KB gz`) for targeted glTF subtree replacement, geometric and
+host add-on (`< 11 KB gz`) for targeted glTF subtree replacement, geometric and
 material constraint grading, preview/accept/reject staging, and bounded undo.
 Core viewer, author, full, and XR bundles never import it (`0 B` core bundle
 overhead).
@@ -56,19 +56,26 @@ if (receipt.status === 'preview') {
 
 - **`preserveBounds`:** Enforces world-space axis-aligned bounding-box placement
   and extent (`min` and `max` on X, Y, and Z within `tolerance * max(size, 1e-6)`,
-  default `tolerance = 0.1`). Equal-size replacements translated away from the
-  original world AABB are rejected.
+  default `tolerance = 0.1`), computed strictly from vertices referenced by each
+  primitive (`primitive.indices` when indexed, or `0..POSITION.count` when
+  unindexed). Equal-size replacements translated away from the original world
+  AABB or expanding drawn bounds via index changes are rejected.
 - **`preserveFootprint`:** Enforces world-space X/Z AABB `min`/`max` placement
   plus floor contact (`min[1]`, default `tolerance = 0.1`).
 - **`preserveHeight`:** Enforces vertical span (`size[1]`, default `tolerance = 0.05`).
 - **`maxBounds`:** Enforces maximum world XYZ extents (`size[ax] <= maxBounds[ax]`).
 - **`matchMaterialOf`:** Checks PBR base color, metallic/roughness, emissive,
   alpha mode, and double-sidedness against a named reference target.
-- **Detached asset reclamation:** Every merge compacts unreachable glTF nodes,
-  meshes, materials, textures, samplers, images, accessors, and `bufferViews`
-  and repacks `bin` so repeated replacements keep active scene memory bounded,
-  while preserving and remapping compressed byte ranges on untouched
-  `EXT_meshopt_compression` / `KHR_meshopt_compression` `bufferViews`.
+- **Detached asset reclamation & extension remapping:** Every merge compacts
+  unreachable glTF nodes, meshes, materials, textures, samplers, images,
+  animations, accessors, and `bufferViews` and repacks `bin` so repeated
+  replacements keep active scene memory bounded. Surviving `KHR_interactivity`
+  pointers/triggers/animations, `KHR_animation_pointer` targets, `MSFT_lod`
+  node lists, `KHR_materials_variants` mappings, `EXT_mesh_gpu_instancing`
+  accessors, and `EXT_meshopt_compression` / `KHR_meshopt_compression` byte
+  ranges are remapped in place; edits that detach a resource referenced by an
+  extension, rely on dynamic interactivity index sockets, or touch documents
+  with unsupported extensions fail closed (`status: 'rejected'`).
 
 ## Capabilities & Lifecycle
 

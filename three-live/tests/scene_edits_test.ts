@@ -23,11 +23,17 @@ import {
 } from '../src/edits';
 import {
   BoxGeometry,
+  BufferGeometry,
   CylinderGeometry,
+  Float32BufferAttribute,
+  Group,
   Mesh,
   MeshStandardMaterial,
   Scene,
+  Uint16BufferAttribute,
+  Uint32BufferAttribute,
 } from '../src/three-author';
+import {InteractivityVM} from '../src/plugins/interactivity';
 import {
   decodeMeshoptGLB,
   encodeMeshoptBuffer,
@@ -449,6 +455,299 @@ async function runTests() {
     );
     assert.deepEqual(Array.from(decodedPos), Array.from(rawPos));
     assert.deepEqual(Array.from(decodedIdx), Array.from(rawIdx));
+  }
+
+  // 11. KHR_interactivity pointer/nodeIndex/material remapping & fail-closed extension guards
+  {
+    const interScene = new Scene();
+    const targetGroup = new Group();
+    targetGroup.name = 'TargetGroup';
+    const oldPart = new Mesh(
+      new BoxGeometry(1, 1, 1),
+      new MeshStandardMaterial({color: 0xef4444}),
+    );
+    oldPart.name = 'OldPart';
+    targetGroup.add(oldPart);
+    interScene.add(targetGroup);
+
+    const untouchedSibling = new Mesh(
+      new BoxGeometry(1, 1, 1),
+      new MeshStandardMaterial({color: 0x3b82f6}),
+    );
+    untouchedSibling.name = 'UntouchedSibling';
+    untouchedSibling.position.set(3, 0, 0);
+    untouchedSibling.userData.interactivity = {
+      onSelect: [
+        {
+          action: 'interpolate',
+          property: 'translation',
+          to: [3, 5, 0],
+          duration: 0,
+        },
+        {
+          action: 'cycleMaterialColor',
+          colors: [[0, 1, 0, 1]],
+          duration: 0,
+        },
+      ],
+    };
+    interScene.add(untouchedSibling);
+
+    const interBase = toGLBData(interScene.toGLB());
+    // Before edit: TargetGroup=0, OldPart=1, UntouchedSibling=2
+    assert.equal(interBase.gltf.nodes[2].name, 'UntouchedSibling');
+
+    const replacementPart = buildTowerScene('ReplacementBox', [1, 1, 1], 0xf59e0b);
+    const editedInter = prepareSceneEdit(interBase, replacementPart, {
+      target: 'TargetGroup',
+      replacement: replacementPart,
+    }).model;
+
+    // After compaction: TargetGroup=0, UntouchedSibling=1, ReplacementBox=2!
+    const sibIdx = editedInter.gltf.nodes.findIndex(
+      (n: any) => n.name === 'UntouchedSibling',
+    );
+    const repIdx = editedInter.gltf.nodes.findIndex(
+      (n: any) => n.name === 'ReplacementBox',
+    );
+    assert.equal(sibIdx, 1);
+    assert.equal(repIdx, 2);
+
+    const graph = editedInter.gltf.extensions.KHR_interactivity.graphs[0];
+    const ptrStrings = graph.nodes
+      .map((n: any) => n.configuration?.pointer)
+      .filter(Boolean);
+    assert.ok(
+      ptrStrings.includes(`/nodes/${sibIdx}/translation`),
+      `Expected KHR_interactivity pointer remapped to /nodes/${sibIdx}/translation, got ${JSON.stringify(ptrStrings)}`,
+    );
+    assert.ok(
+      !ptrStrings.includes(`/nodes/${repIdx}/translation`),
+      'KHR_interactivity pointer must not point to replacement node at old index 2',
+    );
+    const sibMatIdx =
+      editedInter.gltf.meshes[editedInter.gltf.nodes[sibIdx].mesh].primitives[0]
+        .material;
+    assert.ok(
+      ptrStrings.includes(
+        `/materials/${sibMatIdx}/pbrMetallicRoughness/baseColorFactor`,
+      ),
+      'KHR_interactivity material pointer must remap to surviving sibling material',
+    );
+
+    // Execute InteractivityVM on the edited document and verify clicking UntouchedSibling
+    // moves UntouchedSibling (node 1), NOT ReplacementBox (node 2)
+    const vm = new InteractivityVM({}, editedInter.gltf, graph);
+    vm.fireOnSelect({nodeIndex: sibIdx});
+    assert.deepEqual(editedInter.gltf.nodes[sibIdx].translation, [3, 5, 0]);
+    assert.notDeepEqual(editedInter.gltf.nodes[repIdx].translation, [3, 5, 0]);
+    assert.deepEqual(
+      editedInter.gltf.materials[sibMatIdx].pbrMetallicRoughness.baseColorFactor,
+      [0, 1, 0, 1],
+    );
+    vm.dispose();
+
+    // Templated static pointer (/nodes/{target}/scale with {value: [2]}) remaps to [1]
+    const tplBase = {
+      gltf: structuredClone(interBase.gltf),
+      bin: interBase.bin.slice(0),
+      lights: [],
+    };
+    tplBase.gltf.extensions.KHR_interactivity = {
+      graphs: [
+        {
+          declarations: [{op: 'event/onStart'}, {op: 'pointer/set'}],
+          nodes: [
+            {declaration: 0, flows: {out: {node: 1}}},
+            {
+              declaration: 1,
+              configuration: {pointer: {value: '/nodes/{target}/scale'}},
+              values: {
+                target: {value: [2]},
+                value: {value: [2, 2, 2]},
+              },
+            },
+          ],
+        },
+      ],
+      graph: 0,
+    };
+    const editedTpl = prepareSceneEdit(tplBase, replacementPart, {
+      target: 'TargetGroup',
+      replacement: replacementPart,
+    }).model;
+    assert.deepEqual(
+      editedTpl.gltf.extensions.KHR_interactivity.graphs[0].nodes[1].values
+        .target.value,
+      [1],
+    );
+
+    // Fail-closed: pointer targeting detached child OldPart (node 1) rejects edit
+    let curModel: any = interBase;
+    const guardEditor = new SceneEditor({
+      getLoadedModel: () => curModel,
+      loadModel: async (m) => {
+        curModel = m;
+      },
+    });
+    const detachedPtrDoc = {
+      gltf: structuredClone(interBase.gltf),
+      bin: interBase.bin.slice(0),
+      lights: [],
+    };
+    detachedPtrDoc.gltf.extensions.KHR_interactivity.graphs[0].nodes.push({
+      op: 'pointer/set',
+      configuration: {pointer: '/nodes/1/translation'},
+      values: {value: {value: [0, 1, 0]}},
+    });
+    curModel = detachedPtrDoc;
+    const rejDetached = await guardEditor.previewEdit({
+      target: 'TargetGroup',
+      replacement: replacementPart,
+    });
+    assert.equal(rejDetached.status, 'rejected');
+    assert.equal(rejDetached.applied, false);
+    assert.equal(curModel, detachedPtrDoc);
+
+    // Fail-closed: dynamic pointer template rejects edit
+    const dynPtrDoc = {
+      gltf: structuredClone(interBase.gltf),
+      bin: interBase.bin.slice(0),
+      lights: [],
+    };
+    dynPtrDoc.gltf.extensions.KHR_interactivity = {
+      graphs: [
+        {
+          declarations: [
+            {op: 'event/onStart'},
+            {op: 'flow/for'},
+            {op: 'pointer/set'},
+          ],
+          nodes: [
+            {declaration: 0, flows: {out: {node: 1}}},
+            {
+              declaration: 1,
+              values: {startIndex: {value: 0}, endIndex: {value: 2}},
+              flows: {body: {node: 2}},
+            },
+            {
+              declaration: 2,
+              configuration: {pointer: '/nodes/{idx}/scale'},
+              values: {
+                idx: {node: 1, socket: 'index'},
+                value: {value: [1, 1, 1]},
+              },
+            },
+          ],
+        },
+      ],
+      graph: 0,
+    };
+    curModel = dynPtrDoc;
+    const rejDyn = await guardEditor.previewEdit({
+      target: 'TargetGroup',
+      replacement: replacementPart,
+    });
+    assert.equal(rejDyn.status, 'rejected');
+    assert.equal(rejDyn.applied, false);
+
+    // Fail-closed: unsupported base document extension rejects edit
+    const unknownExtDoc = {
+      gltf: structuredClone(interBase.gltf),
+      bin: interBase.bin.slice(0),
+      lights: [],
+    };
+    unknownExtDoc.gltf.extensionsUsed = ['VENDOR_custom_rig'];
+    unknownExtDoc.gltf.extensions = {VENDOR_custom_rig: {node: 2}};
+    curModel = unknownExtDoc;
+    const rejUnknown = await guardEditor.previewEdit({
+      target: 'TargetGroup',
+      replacement: replacementPart,
+    });
+    assert.equal(rejUnknown.status, 'rejected');
+    assert.equal(rejUnknown.applied, false);
+  }
+
+  // 12. Indexed-vertex bounds: unreferenced POSITION outliers are ignored; index-only extent growth fails preserveBounds
+  {
+    const makeSharedPosIndexedBox = (
+      name: string,
+      useLargeRange: boolean,
+      useUint32 = false,
+    ) => {
+      // 8 unit-cube vertices [-0.5..0.5] (extent 1) followed by 8 10x-cube vertices [-5..5] (extent 10)
+      const unitVerts = [
+        -0.5, -0.5, -0.5, 0.5, -0.5, -0.5, 0.5, 0.5, -0.5, -0.5, 0.5, -0.5,
+        -0.5, -0.5, 0.5, 0.5, -0.5, 0.5, 0.5, 0.5, 0.5, -0.5, 0.5, 0.5,
+      ];
+      const tenVerts = unitVerts.map((v) => v * 10);
+      const geo = new BufferGeometry();
+      geo.setAttribute(
+        'position',
+        new Float32BufferAttribute([...unitVerts, ...tenVerts], 3),
+      );
+      const baseOff = useLargeRange ? 8 : 0;
+      const triIndices = [
+        0, 1, 2, 0, 2, 3,
+        4, 6, 5, 4, 7, 6,
+      ].map((i) => i + baseOff);
+      geo.setIndex(
+        useUint32
+          ? new Uint32BufferAttribute(triIndices, 1)
+          : new Uint16BufferAttribute(triIndices, 1),
+      );
+      const s = new Scene();
+      const m = new Mesh(geo, new MeshStandardMaterial({color: 0x10b981}));
+      m.name = name;
+      s.add(m);
+      return toGLBData(s.toGLB());
+    };
+
+    const unitIndexed = makeSharedPosIndexedBox('Target', false, false);
+    const tenIndexed = makeSharedPosIndexedBox('Target', true, true);
+
+    assert.deepEqual(computeSubtreeBoundsSize(unitIndexed, [0]), [1, 1, 1]);
+    assert.deepEqual(computeSubtreeBoundsSize(tenIndexed, [0]), [10, 10, 10]);
+
+    let activeIndexed = unitIndexed;
+    const idxEditor = new SceneEditor({
+      getLoadedModel: () => activeIndexed,
+      loadModel: async (m) => {
+        activeIndexed = m;
+      },
+    });
+    const idxReceipt = await idxEditor.previewEdit({
+      target: 'Target',
+      replacement: tenIndexed,
+      constraints: {preserveBounds: {tolerance: 0}},
+    });
+    assert.equal(idxReceipt.status, 'rejected');
+    assert.equal(idxReceipt.applied, false);
+    assert.equal(idxReceipt.constraints[0]?.name, 'preserveBounds');
+    assert.equal(idxReceipt.constraints[0]?.passed, false);
+    assert.equal(activeIndexed, unitIndexed);
+
+    // UNSIGNED_BYTE (5121) indices also compute exact referenced bounds
+    const u8Doc = {
+      gltf: structuredClone(unitIndexed.gltf),
+      bin: unitIndexed.bin.slice(0),
+      lights: [],
+    };
+    const u8Bytes = new Uint8Array([0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6]);
+    const oldBin = new Uint8Array(u8Doc.bin);
+    const merged = new Uint8Array(oldBin.length + 12);
+    merged.set(oldBin);
+    merged.set(u8Bytes, oldBin.length);
+    u8Doc.bin = merged.buffer;
+    u8Doc.gltf.buffers[0].byteLength = merged.length;
+    const idxAcc =
+      u8Doc.gltf.accessors[u8Doc.gltf.meshes[0].primitives[0].indices];
+    const idxBv = u8Doc.gltf.bufferViews[idxAcc.bufferView];
+    idxBv.byteOffset = oldBin.length;
+    idxBv.byteLength = 12;
+    idxAcc.componentType = 5121;
+    idxAcc.count = 12;
+    assert.deepEqual(computeSubtreeBounds(u8Doc, [0]).size, [1, 1, 1]);
   }
 
   sceneEditsPlugin.onElementDisconnected?.(host);

@@ -77,23 +77,104 @@ export interface SceneEditableElement extends SceneEditHost {
 const MAX_BYTES = 64 * 1024 * 1024;
 const MAX_JSON_BYTES = 4 * 1024 * 1024;
 
+const khrMat = (s: string) =>
+  s.split(' ').map((k) => `KHR_materials_${k}`);
+
 const ALLOWED_REPLACEMENT_EXTENSIONS = new Set([
-  'KHR_materials_unlit',
-  'KHR_materials_clearcoat',
-  'KHR_materials_transmission',
-  'KHR_materials_ior',
-  'KHR_materials_volume',
-  'KHR_materials_specular',
-  'KHR_materials_sheen',
+  ...khrMat('unlit clearcoat transmission ior volume specular sheen'),
   'KHR_mesh_quantization',
   'KHR_node_visibility',
   'EXT_meshopt_compression',
   'KHR_meshopt_compression',
 ]);
 
+const SAFE_TARGET_NODE_EXTENSIONS = new Set([
+  'KHR_node_visibility',
+  'ANDROID_xr_scenecore',
+  'MOZ_hubs_components',
+]);
+
+const SUPPORTED_BASE_EXTENSIONS = new Set([
+  ...ALLOWED_REPLACEMENT_EXTENSIONS,
+  ...SAFE_TARGET_NODE_EXTENSIONS,
+  ...khrMat('emissive_strength iridescence anisotropy dispersion variants'),
+  'KHR_texture_transform',
+  'KHR_lights_punctual',
+  'KHR_audio_emitter',
+  'KHR_interactivity',
+  'KHR_animation_pointer',
+  'EXT_mesh_gpu_instancing',
+  'MSFT_lod',
+]);
+
+const FORBIDDEN_PTR_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
+const INDEX_LEAF_SEGMENTS = new Set(
+  'mesh skin camera children material indices bufferView source sampler'.split(
+    ' ',
+  ),
+);
+
+const fail = (m: string): never => {
+  const err = new Error(m);
+  throw err;
+};
+
 const meshoptExt = (bv: any): any =>
   bv?.extensions?.KHR_meshopt_compression ??
   bv?.extensions?.EXT_meshopt_compression;
+
+function checkExtObj(holder: any): void {
+  const ext = holder?.extensions;
+  if (!ext || typeof ext !== 'object') return;
+  if (Array.isArray(ext)) fail('Invalid extensions container');
+  for (const k of Object.keys(ext)) {
+    if (!SUPPORTED_BASE_EXTENSIONS.has(k)) {
+      fail(`Unsupported extension "${k}"`);
+    }
+  }
+}
+
+function assertSupportedBaseExtensions(g: any): void {
+  for (const k of [
+    ...(g.extensionsUsed || []),
+    ...(g.extensionsRequired || []),
+  ]) {
+    if (!SUPPORTED_BASE_EXTENSIONS.has(k)) {
+      fail(`Unsupported extension "${k}"`);
+    }
+  }
+  checkExtObj(g);
+  for (const list of [
+    g.scenes,
+    g.nodes,
+    g.meshes,
+    g.materials,
+    g.textures,
+    g.samplers,
+    g.images,
+    g.accessors,
+    g.bufferViews,
+    g.buffers,
+    g.skins,
+    g.cameras,
+    g.animations,
+  ]) {
+    for (const item of list || []) checkExtObj(item);
+  }
+  for (const m of g.meshes || []) {
+    for (const p of m?.primitives || []) checkExtObj(p);
+  }
+  for (const m of g.materials || []) {
+    visitMatTextures(m, (t) => checkExtObj(t));
+  }
+  for (const a of g.animations || []) {
+    for (const s of a?.samplers || []) checkExtObj(s);
+    for (const c of a?.channels || []) {
+      checkExtObj(c);
+      checkExtObj(c?.target);
+    }
+  }
+}
 
 function visitMatTextures(v: any, fn: (t: {index: number}) => void): void {
   if (!v || typeof v !== 'object') return;
@@ -130,7 +211,7 @@ function unpackGLBData(input: unknown): GLBData {
     dv.getUint32(0, true) !== 0x46546c67 ||
     dv.getUint32(4, true) !== 2
   ) {
-    throw new Error('Invalid GLB header');
+    fail('Invalid GLB header');
   }
   const totalLen = dv.getUint32(8, true);
   const jsonLen = dv.getUint32(12, true);
@@ -139,7 +220,7 @@ function unpackGLBData(input: unknown): GLBData {
     dv.getUint32(16, true) !== 0x4e4f534a ||
     20 + jsonLen > totalLen
   ) {
-    throw new Error('Invalid GLB JSON chunk');
+    fail('Invalid GLB JSON chunk');
   }
   const gltf = JSON.parse(
     new TextDecoder().decode(new Uint8Array(buffer, 20, jsonLen)),
@@ -148,7 +229,7 @@ function unpackGLBData(input: unknown): GLBData {
   const bh = 20 + jsonLen;
   if (bh + 8 <= totalLen && dv.getUint32(bh + 4, true) === 0x004e4942) {
     const bl = dv.getUint32(bh, true);
-    if (bh + 8 + bl > totalLen) throw new Error('Truncated GLB BIN');
+    if (bh + 8 + bl > totalLen) fail('Truncated GLB BIN');
     bin = buffer.slice(bh + 8, bh + 8 + bl);
   }
   return {gltf, bin, lights: []};
@@ -161,7 +242,7 @@ function snapshot(input: unknown): GLBData {
     data.bin.byteLength > MAX_BYTES ||
     new TextEncoder().encode(json).byteLength > MAX_JSON_BYTES
   ) {
-    throw new Error('Edit document exceeds storage limit');
+    fail('Edit document exceeds storage limit');
   }
   return {
     ...data,
@@ -177,7 +258,7 @@ function resolveTargets(gltf: any, names: string | string[]): number[] {
     !requested.length ||
     requested.some((name) => typeof name !== 'string' || !name.trim())
   ) {
-    throw new Error('An edit needs named targets');
+    fail('An edit needs named targets');
   }
   return [
     ...new Set(
@@ -186,7 +267,7 @@ function resolveTargets(gltf: any, names: string | string[]): number[] {
           .map((node: any, i: number) => (node.name === name ? i : -1))
           .filter((i: number) => i >= 0);
         if (found.length !== 1) {
-          throw new Error(`Target "${name}" is absent or ambiguous`);
+          fail(`Target "${name}" is absent or ambiguous`);
         }
         return found[0];
       }),
@@ -200,7 +281,7 @@ function collectDescendants(gltf: any, roots: number[]): Set<number> {
   while (pending.length) {
     const i = pending.pop()!;
     if (result.has(i)) continue;
-    if (!gltf.nodes?.[i]) throw new Error('Invalid node reference');
+    if (!gltf.nodes?.[i]) fail('Invalid node reference');
     result.add(i);
     pending.push(...(gltf.nodes[i].children || []));
   }
@@ -211,6 +292,56 @@ export interface SubtreeBounds {
   min: [number, number, number];
   max: [number, number, number];
   size: [number, number, number];
+}
+
+function readPrimitiveIndices(
+  g: any,
+  bin: ArrayBuffer,
+  idxIndex: number,
+  vertexCount: number,
+): Uint32Array {
+  const acc = g.accessors?.[idxIndex];
+  const bv = g.bufferViews?.[acc?.bufferView];
+  if (
+    !acc ||
+    !bv ||
+    acc.sparse ||
+    meshoptExt(bv) ||
+    acc.normalized ||
+    (acc.type && acc.type !== 'SCALAR')
+  ) {
+    fail('Invalid or compressed index accessor');
+  }
+  const count = Number(acc.count ?? 0);
+  const ct = acc.componentType;
+  const size = ct === 5121 ? 1 : ct === 5123 ? 2 : ct === 5125 ? 4 : 0;
+  const stride = bv.byteStride && bv.byteStride > 0 ? bv.byteStride : size;
+  const base = (bv.byteOffset || 0) + (acc.byteOffset || 0);
+  if (
+    !size ||
+    !Number.isInteger(count) ||
+    count <= 0 ||
+    !Number.isInteger(base) ||
+    base < 0 ||
+    stride < size ||
+    base + (count - 1) * stride + size > bin.byteLength
+  ) {
+    fail('Invalid index accessor range');
+  }
+  const dv = new DataView(bin);
+  const out = new Uint32Array(count);
+  for (let i = 0; i < count; i++) {
+    const o = base + i * stride;
+    const v =
+      ct === 5121
+        ? dv.getUint8(o)
+        : ct === 5123
+          ? dv.getUint16(o, true)
+          : dv.getUint32(o, true);
+    if (v >= vertexCount) fail('Vertex index out of bounds');
+    out[i] = v;
+  }
+  return out;
 }
 
 export function computeSubtreeBounds(
@@ -224,19 +355,32 @@ export function computeSubtreeBounds(
   for (const i of collectDescendants(g, roots)) {
     const node = g.nodes[i];
     if (node.extensions?.EXT_mesh_gpu_instancing || node.skin !== undefined) {
-      throw new Error(
+      fail(
         'Bounds constraints on skinned or instanced targets need an explicit adapter',
       );
     }
     for (const primitive of g.meshes?.[node.mesh]?.primitives || []) {
       const accessor = g.accessors?.[primitive.attributes?.POSITION];
       if (accessor?.sparse || meshoptExt(g.bufferViews?.[accessor?.bufferView])) {
-        throw new Error('Compressed or sparse bounds need decoded bufferViews');
+        fail('Compressed or sparse bounds need decoded bufferViews');
       }
       const positions = readAccessorAsFloat32(g, data.bin, accessor, 3);
-      if (!positions) throw new Error('Target has no readable positions');
+      if (!positions) fail('Target has no readable positions');
+      const vertCount = positions.length / 3;
+      const indices =
+        primitive.indices !== undefined
+          ? readPrimitiveIndices(g, data.bin, primitive.indices, vertCount)
+          : null;
+      const seen = indices ? new Uint8Array(vertCount) : null;
+      const drawCount = indices ? indices.length : vertCount;
       const m = matrices[i];
-      for (let p = 0; p < positions.length; p += 3) {
+      for (let k = 0; k < drawCount; k++) {
+        const vi = indices ? indices[k] : k;
+        if (seen) {
+          if (seen[vi]) continue;
+          seen[vi] = 1;
+        }
+        const p = vi * 3;
         for (let axis = 0; axis < 3; axis++) {
           const v =
             m[axis] * positions[p] +
@@ -244,7 +388,7 @@ export function computeSubtreeBounds(
             m[8 + axis] * positions[p + 2] +
             m[12 + axis];
           if (!Number.isFinite(v) || !Number.isFinite(Math.fround(v))) {
-            throw new Error('Target transform is not representable');
+            fail('Target transform is not representable');
           }
           min[axis] = Math.min(min[axis], v);
           max[axis] = Math.max(max[axis], v);
@@ -252,7 +396,7 @@ export function computeSubtreeBounds(
       }
     }
   }
-  if (!Number.isFinite(min[0])) throw new Error('Target has no geometry');
+  if (!Number.isFinite(min[0])) fail('Target has no geometry');
   return {
     min,
     max,
@@ -287,19 +431,34 @@ function compactList(
   return remap;
 }
 
-/** Reclaim detached glTF nodes/meshes/materials/textures/accessors/bufferViews and repack BIN. */
-function compactGltfDocument(doc: GLBData): Map<number, number> {
+/** Reclaim detached glTF nodes/meshes/materials/textures/accessors/bufferViews, remap extensions, and repack BIN. */
+function compactGltfDocument(
+  doc: GLBData,
+  replacedTargets: ReadonlySet<number> = new Set(),
+): Map<number, number> {
   const g = doc.gltf;
   const liveNodes = collectDescendants(
     g,
     (g.scenes || []).flatMap((s: any) => s?.nodes || []),
   );
-  for (const ni of [...liveNodes]) {
-    const skin = g.skins?.[g.nodes[ni]?.skin];
-    if (skin) {
-      for (const j of [...(skin.joints || []), skin.skeleton]) {
-        if (typeof j === 'number' && g.nodes?.[j]) {
-          for (const d of collectDescendants(g, [j])) liveNodes.add(d);
+  const nodeQueue = [...liveNodes];
+  while (nodeQueue.length) {
+    const ni = nodeQueue.pop()!;
+    const nd = g.nodes?.[ni];
+    const skin = g.skins?.[nd?.skin];
+    const extraRoots = [
+      ...(skin ? [...(skin.joints || []), skin.skeleton] : []),
+      ...(Array.isArray(nd?.extensions?.MSFT_lod?.ids)
+        ? nd.extensions.MSFT_lod.ids
+        : []),
+    ];
+    for (const j of extraRoots) {
+      if (typeof j === 'number') {
+        for (const d of collectDescendants(g, [j])) {
+          if (!liveNodes.has(d)) {
+            liveNodes.add(d);
+            nodeQueue.push(d);
+          }
         }
       }
     }
@@ -319,14 +478,35 @@ function compactGltfDocument(doc: GLBData): Map<number, number> {
       n.children = n.children.map((i: number) => nodeMap.get(i)!);
       if (!n.children.length) delete n.children;
     }
+    const msft = n.extensions?.MSFT_lod;
+    if (Array.isArray(msft?.ids)) {
+      msft.ids = msft.ids.map((i: number) => {
+        const next = nodeMap.get(i);
+        if (next === undefined) fail('Detached MSFT_lod node');
+        return next;
+      });
+    }
+  }
+  for (const holder of [g.asset?.extras, doc as any]) {
+    if (Array.isArray(holder?.lights)) {
+      holder.lights = holder.lights.filter((l: any) => {
+        if (typeof l?.nodeIndex !== 'number') return true;
+        const next = nodeMap.get(l.nodeIndex);
+        if (next === undefined) return false;
+        l.nodeIndex = next;
+        return true;
+      });
+    }
   }
 
+  const animMap = new Map<number, number>();
   if (Array.isArray(g.animations)) {
-    g.animations = g.animations.filter((anim: any) => {
+    const keptAnims: any[] = [];
+    g.animations.forEach((anim: any, oldIdx: number) => {
       const chs = (anim.channels || []).filter(
         (c: any) => c.target?.node === undefined || nodeMap.has(c.target.node),
       );
-      if (!chs.length) return false;
+      if (!chs.length) return;
       const liveS = new Set<number>();
       for (const c of chs) {
         if (c.target?.node !== undefined) {
@@ -339,9 +519,11 @@ function compactGltfDocument(doc: GLBData): Map<number, number> {
         if (typeof c.sampler === 'number') c.sampler = sm.get(c.sampler);
       }
       anim.channels = chs;
-      return true;
+      animMap.set(oldIdx, keptAnims.length);
+      keptAnims.push(anim);
     });
-    if (!g.animations.length) delete g.animations;
+    if (keptAnims.length) g.animations = keptAnims;
+    else delete g.animations;
   }
 
   const mark = (set: Set<number>, v: unknown) => {
@@ -441,10 +623,235 @@ function compactGltfDocument(doc: GLBData): Map<number, number> {
       ref(a.sparse?.values, 'bufferView', liveBvs, bvMap);
     }
     for (const im of g.images || []) ref(im, 'bufferView', liveBvs, bvMap);
+    for (const au of g.extensions?.KHR_audio_emitter?.audio || []) {
+      ref(au, 'bufferView', liveBvs, bvMap);
+    }
   };
   visitBvRefs();
   bvMap = compactList(g, 'bufferViews', liveBvs);
   visitBvRefs();
+
+  const ptrMaps: Record<string, Map<number, number>> = {
+    nodes: nodeMap,
+    meshes: meshMap,
+    materials: matMap,
+    textures: texMap,
+    images: imgMap,
+    samplers: sampMap,
+    skins: skinMap,
+    cameras: camMap,
+    animations: animMap,
+    accessors: accMap,
+    bufferViews: bvMap,
+  };
+  const remapSlot = (
+    bag: any,
+    key: string,
+    fn: (v: unknown) => unknown,
+  ): boolean => {
+    if (!bag || typeof bag !== 'object' || !(key in bag)) return false;
+    const raw = bag[key];
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      if ('node' in raw && raw.node !== undefined) {
+        fail('Dynamic interactivity reference cannot be remapped');
+      }
+      if (!('value' in raw)) fail('Invalid interactivity binding');
+      if (Array.isArray(raw.value) && raw.value.length === 1) {
+        raw.value[0] = fn(raw.value[0]);
+      } else {
+        raw.value = fn(raw.value);
+      }
+      return true;
+    }
+    bag[key] = fn(raw);
+    return true;
+  };
+  const remapPointer = (ptr: unknown, tplNode?: any): string => {
+    if (typeof ptr !== 'string' || !ptr.startsWith('/')) {
+      fail('Invalid glTF pointer');
+    }
+    const segs = ptr.slice(1).split('/');
+    if (segs.length < 2) fail('Invalid glTF pointer');
+    for (let si = 0; si < segs.length; si++) {
+      const unesc = segs[si].replace(/~1/g, '/').replace(/~0/g, '~');
+      if (
+        !unesc ||
+        FORBIDDEN_PTR_SEGMENTS.has(unesc) ||
+        FORBIDDEN_PTR_SEGMENTS.has(segs[si]) ||
+        (si >= 2 && INDEX_LEAF_SEGMENTS.has(unesc))
+      ) {
+        fail('Unsupported glTF pointer segment');
+      }
+    }
+    if (segs[0] === 'extensions') {
+      if (
+        segs[1] === 'KHR_lights_punctual' &&
+        segs[2] === 'lights' &&
+        /^\d+$/.test(segs[3]) &&
+        Number(segs[3]) < (g.extensions?.KHR_lights_punctual?.lights?.length || 0)
+      ) {
+        return ptr;
+      }
+      fail('Unsupported extension pointer');
+    }
+    const map = ptrMaps[segs[0]];
+    if (!map) fail(`Unsupported pointer root "${segs[0]}"`);
+    const checkReplacedNodeProp = (oldIdx: number) => {
+      if (
+        segs[0] === 'nodes' &&
+        replacedTargets.has(oldIdx) &&
+        !(
+          segs[2] === 'translation' ||
+          segs[2] === 'rotation' ||
+          segs[2] === 'scale' ||
+          segs[2] === 'visible' ||
+          (segs[2] === 'extensions' && segs[3] === 'KHR_node_visibility')
+        )
+      ) {
+        fail('Pointer targets replaced node payload');
+      }
+    };
+    const mapCollectionIdx = (v: unknown): number => {
+      if (typeof v !== 'number' || !Number.isInteger(v)) {
+        fail('Invalid pointer index');
+      }
+      const next = map.get(v);
+      if (next === undefined) {
+        fail('Edit detaches resource referenced by pointer');
+      }
+      checkReplacedNodeProp(v);
+      return next;
+    };
+    if (/^\d+$/.test(segs[1])) {
+      segs[1] = String(mapCollectionIdx(Number(segs[1])));
+      return '/' + segs.join('/');
+    }
+    const tpl = tplNode && /^\{([a-zA-Z0-9_]+)\}$/.exec(segs[1]);
+    if (tpl) {
+      const param = tpl[1];
+      const inVals = remapSlot(tplNode.values, param, mapCollectionIdx);
+      const inCfg = remapSlot(tplNode.configuration, param, mapCollectionIdx);
+      if (!inVals && !inCfg) {
+        fail('Unbound interactivity pointer template');
+      }
+      return ptr;
+    }
+    fail('Unremappable glTF pointer');
+  };
+
+  for (const anim of g.animations || []) {
+    for (const ch of anim.channels || []) {
+      const kp = ch.target?.extensions?.KHR_animation_pointer;
+      if (kp && typeof kp === 'object') {
+        kp.pointer = remapPointer(kp.pointer);
+      } else if (ch.target?.path === 'pointer') {
+        fail('Invalid KHR_animation_pointer channel');
+      }
+    }
+  }
+
+  if (g.extensions?.KHR_interactivity !== undefined) {
+    const ext = g.extensions.KHR_interactivity;
+    const graphs = Array.isArray(ext?.graphs)
+      ? ext.graphs
+      : Array.isArray(ext?.nodes)
+        ? [ext]
+        : null;
+    if (!graphs) fail('Invalid KHR_interactivity extension');
+    for (const gr of graphs) {
+      const decls = Array.isArray(gr?.declarations) ? gr.declarations : [];
+      if (!Array.isArray(gr?.nodes)) {
+        fail('Invalid KHR_interactivity graph');
+      }
+      for (const gn of gr.nodes) {
+        if (!gn || typeof gn !== 'object') {
+          fail('Invalid KHR_interactivity node');
+        }
+        for (const k of Object.keys(gn.values || {})) {
+          const s = gn.values[k];
+          if (
+            s &&
+            typeof s === 'object' &&
+            typeof s.node === 'number' &&
+            (s.socket === 'nodeIndex' ||
+              s.socket === 'meshIndex' ||
+              s.socket === 'hitNodeIndex')
+          ) {
+            fail(
+              'Dynamic interactivity nodeIndex output cannot be remapped',
+            );
+          }
+        }
+        const op =
+          gn.op ||
+          (typeof gn.declaration === 'number' ? decls[gn.declaration]?.op : '');
+        if (
+          op === 'pointer/get' ||
+          op === 'pointer/set' ||
+          op === 'pointer/interpolate'
+        ) {
+          const cOk = remapSlot(gn.configuration, 'pointer', (p) =>
+            remapPointer(p, gn),
+          );
+          const vOk = remapSlot(gn.values, 'pointer', (p) =>
+            remapPointer(p, gn),
+          );
+          if (!cOk && !vOk) fail('Missing interactivity pointer');
+        } else if (
+          /^(pointer|event|scene)\/on(Select|HoverIn|HoverOut)$/.test(op)
+        ) {
+          const mapHitNode = (v: unknown) => {
+            if (v === undefined || v === null) return v;
+            if (typeof v !== 'number' || !Number.isInteger(v)) {
+              fail('Invalid interactivity nodeIndex');
+            }
+            if (v < 0) return v;
+            const next = nodeMap.get(v);
+            if (next === undefined) {
+              fail(
+                'Edit detaches node referenced by KHR_interactivity',
+              );
+            }
+            return next;
+          };
+          for (const k of ['nodeIndex', 'node']) {
+            remapSlot(gn.configuration, k, mapHitNode);
+            remapSlot(gn.values, k, mapHitNode);
+          }
+        } else if (/^animation\/(start|stop|stopAt|resetAt)$/.test(op)) {
+          const mapAnim = (v: unknown) => {
+            if (v === undefined || v === null) return v;
+            if (typeof v === 'string') {
+              if (!(g.animations || []).some((a: any) => a?.name === v)) {
+                fail(
+                  'Edit detaches animation referenced by KHR_interactivity',
+                );
+              }
+              return v;
+            }
+            if (typeof v !== 'number' || !Number.isInteger(v)) {
+              fail('Invalid interactivity animation');
+            }
+            const next = animMap.get(v);
+            if (next === undefined) {
+              fail(
+                'Edit detaches animation referenced by KHR_interactivity',
+              );
+            }
+            return next;
+          };
+          remapSlot(gn.configuration, 'animation', mapAnim);
+          remapSlot(gn.values, 'animation', mapAnim);
+        } else if (
+          !/^(flow\/|math\/|type\/|variable\/|(customE|e)vent\/(onStart|onTick|send|receive)$|debug\/log$)/.test(
+            op,
+          )
+        ) {
+          fail(`Unsupported KHR_interactivity op "${String(op)}"`);
+        }
+      }
+    }
+  }
 
   const srcBytes = new Uint8Array(doc.bin);
   const bvs: any[] = g.bufferViews || [];
@@ -458,7 +865,7 @@ function compactGltfDocument(doc: GLBData): Map<number, number> {
     const mExt = meshoptExt(bv);
     if (mExt && typeof mExt === 'object') {
       if (Number(mExt.buffer ?? 0) !== 0) {
-        throw new Error('Unsupported meshopt buffer');
+        fail('Unsupported meshopt buffer');
       }
       const off = Number(mExt.byteOffset ?? 0);
       const bl = Number(mExt.byteLength ?? 0);
@@ -469,7 +876,7 @@ function compactGltfDocument(doc: GLBData): Map<number, number> {
         bl < 0 ||
         off + bl > srcBytes.length
       ) {
-        throw new Error('Invalid meshopt byte range');
+        fail('Invalid meshopt byte range');
       }
       if (bv.extensions?.KHR_meshopt_compression) usedKhr = true;
       else usedExt = true;
@@ -491,11 +898,11 @@ function compactGltfDocument(doc: GLBData): Map<number, number> {
         bv.byteOffset = 0;
       }
     } else {
-      if (bv.buffer) throw new Error('Unsupported buffer reference');
+      if (bv.buffer) fail('Unsupported buffer reference');
       const off = bv.byteOffset || 0;
       const bl = bv.byteLength || 0;
       if (off < 0 || bl < 0 || off + bl > srcBytes.length) {
-        throw new Error('Invalid bufferView byte range');
+        fail('Invalid bufferView byte range');
       }
       len = (len + 3) & ~3;
       bv.buffer = 0;
@@ -537,7 +944,7 @@ function firstMaterial(g: any, roots: number[]): any {
     const primitive = g.meshes?.[g.nodes[i].mesh]?.primitives?.[0];
     if (primitive) return g.materials?.[primitive.material] || {};
   }
-  throw new Error('Material target has no primitives');
+  fail('Material target has no primitives');
 }
 
 function sameMaterialProps(a: any, b: any): boolean {
@@ -569,30 +976,41 @@ export function prepareSceneEdit(
   const candidate = snapshot(replacement);
   const g = base.gltf;
   const r = candidate.gltf;
+  assertSupportedBaseExtensions(g);
   const selected = resolveTargets(g, options.target);
+  const selectedSet = new Set(selected);
   const affected = collectDescendants(g, selected);
 
   if (
     [...affected].some(
       (i) =>
         g.nodes[i].skin !== undefined ||
-        g.nodes[i].extensions?.EXT_mesh_gpu_instancing,
+        Object.keys(g.nodes[i].extensions || {}).some(
+          (k) => !SAFE_TARGET_NODE_EXTENSIONS.has(k),
+        ),
+    ) ||
+    (g.nodes || []).some(
+      (n: any, ni: number) =>
+        !affected.has(ni) &&
+        Array.isArray(n?.extensions?.MSFT_lod?.ids) &&
+        n.extensions.MSFT_lod.ids.some((id: number) => affected.has(id)),
     ) ||
     (g.animations || []).some((a: any) =>
       (a.channels || []).some(
         (ch: any) =>
-          affected.has(ch.target?.node) && !selected.includes(ch.target.node),
+          (affected.has(ch.target?.node) && !selectedSet.has(ch.target.node)) ||
+          (selectedSet.has(ch.target?.node) && ch.target?.path === 'weights'),
       ),
     )
   ) {
-    throw new Error('Skinned, instanced, or animated targets unsupported');
+    fail('Skinned, instanced, LOD, or animated targets unsupported');
   }
 
   for (const i of selected) {
     if (
       selected.some((j) => j !== i && collectDescendants(g, [j]).has(i))
     ) {
-      throw new Error('Overlapping edit targets');
+      fail('Overlapping edit targets');
     }
   }
 
@@ -611,7 +1029,7 @@ export function prepareSceneEdit(
     r.cameras?.length ||
     hasDisallowedNodeExt
   ) {
-    throw new Error('Unsupported replacement features');
+    fail('Unsupported replacement features');
   }
 
   const badBufs = (bufs: any[] | undefined) =>
@@ -619,7 +1037,7 @@ export function prepareSceneEdit(
       (b, i) => b?.uri || (i > 0 && !meshoptExt(b)?.fallback),
     );
   if (badBufs(g.buffers) || badBufs(r.buffers)) {
-    throw new Error('Edits require a single embedded binary buffer');
+    fail('Edits require a single embedded binary buffer');
   }
 
   const copiedMaterial = options.copyMaterialFrom
@@ -630,7 +1048,7 @@ export function prepareSceneEdit(
   const roots: number[] = options.replacementTarget
     ? resolveTargets(r, options.replacementTarget)
     : r.scenes?.[r.scene ?? 0]?.nodes || [];
-  if (!roots.length) throw new Error('Replacement has no scene roots');
+  if (!roots.length) fail('Replacement has no scene roots');
 
   const fields = [
     'bufferViews',
@@ -651,18 +1069,18 @@ export function prepareSceneEdit(
 
   const byteOffset = Math.ceil(base.bin.byteLength / 4) * 4;
   if (byteOffset + candidate.bin.byteLength > MAX_BYTES) {
-    throw new Error('Merged edit exceeds storage limit');
+    fail('Merged edit exceeds storage limit');
   }
   for (const bv of r.bufferViews) {
     const mExt = meshoptExt(bv);
     if (mExt && typeof mExt === 'object') {
       if (Number(mExt.buffer ?? 0) !== 0) {
-        throw new Error('Unsupported meshopt buffer');
+        fail('Unsupported meshopt buffer');
       }
       mExt.buffer = 0;
       mExt.byteOffset = (mExt.byteOffset || 0) + byteOffset;
     } else {
-      if (bv.buffer) throw new Error('Unsupported buffer reference');
+      if (bv.buffer) fail('Unsupported buffer reference');
       bv.buffer = 0;
       bv.byteOffset = (bv.byteOffset || 0) + byteOffset;
     }
@@ -682,7 +1100,7 @@ export function prepareSceneEdit(
     if (texture.source !== undefined) texture.source += offset.images;
     if (texture.sampler !== undefined) texture.sampler += offset.samplers;
     if (texture.extensions) {
-      throw new Error(
+      fail(
         'Replacement texture extensions require an explicit adapter',
       );
     }
@@ -697,7 +1115,7 @@ export function prepareSceneEdit(
   for (const mesh of r.meshes) {
     for (const p of mesh.primitives || []) {
       if (p.extensions) {
-        throw new Error(
+        fail(
           'Replacement primitive extensions require an explicit adapter',
         );
       }
@@ -779,7 +1197,7 @@ export function prepareSceneEdit(
     }
   }
 
-  const nodeRemap = compactGltfDocument(base);
+  const nodeRemap = compactGltfDocument(base, selectedSet);
   const afterTargets = selected.map((i) => nodeRemap.get(i)!);
 
   const after = computeSubtreeBounds(base, afterTargets);
@@ -796,7 +1214,7 @@ export function prepareSceneEdit(
     ): number => {
       const t = typeof val === 'object' ? (val.tolerance ?? fallback) : fallback;
       if (!Number.isFinite(t) || t < 0) {
-        throw new Error('Invalid constraint tolerance');
+        fail('Invalid constraint tolerance');
       }
       return t;
     };
@@ -838,7 +1256,7 @@ export function prepareSceneEdit(
         c.maxBounds.length !== 3 ||
         c.maxBounds.some((v) => !Number.isFinite(v) || v < 0)
       ) {
-        throw new Error('Invalid maxBounds constraint');
+        fail('Invalid maxBounds constraint');
       }
       checks.push({
         name: 'maxBounds',
@@ -877,7 +1295,7 @@ export class SceneEditor {
       maxUndoSteps < 0 ||
       maxUndoSteps > 16
     ) {
-      throw new Error('Undo limit must be 0–16');
+      fail('Undo limit must be 0–16');
     }
     let gen = 0;
     let depth = 0;
@@ -952,7 +1370,7 @@ export class SceneEditor {
       try {
         await apply(prev);
         if (startRev !== curRev() || host.getLoadedModel() !== prev) {
-          throw new Error('Edit was superseded');
+          fail('Edit was superseded');
         }
         commit();
         installed = prev;
@@ -982,12 +1400,12 @@ export class SceneEditor {
               url: input,
             })
           ) {
-            throw new Error(
+            fail(
               "Capability 'remote_content' or 'network' denied for replacement URL.",
             );
           }
           const res = await fetch(input);
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          if (!res.ok) fail(`HTTP ${res.status}`);
           rep = snapshot(await res.arrayBuffer());
         } else {
           rep = snapshot(input);
@@ -998,7 +1416,7 @@ export class SceneEditor {
           startRev !== curRev() ||
           source !== host.getLoadedModel()
         ) {
-          throw new Error('Edit was superseded');
+          fail('Edit was superseded');
         }
         const prepared = prepareSceneEdit(before, rep, options);
         const rc: SceneEditReceipt = {
@@ -1018,7 +1436,7 @@ export class SceneEditor {
           startRev !== curRev() ||
           host.getLoadedModel() !== prepared.model
         ) {
-          throw new Error('Edit was superseded');
+          fail('Edit was superseded');
         }
         installed = prepared.model;
         rev = curRev();
@@ -1080,7 +1498,7 @@ export class SceneEditor {
       try {
         if (active) {
           const rej = await this.rejectEdit();
-          if (rej.errors.length) throw new Error(rej.errors.join('; '));
+          if (rej.errors.length) fail(rej.errors.join('; '));
         }
       } finally {
         gen++;
