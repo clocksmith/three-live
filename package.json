@@ -148,7 +148,7 @@
       "require": "./three-live/dist/three-live-tsl.cjs"
     },
     "./edits": {
-      "types": "./three-live/dist/edits.d.ts",
+      "types": "./three-live/dist/three-live-edits.d.ts",
       "import": "./three-live/dist/three-live-edits.js",
       "require": "./three-live/dist/three-live-edits.cjs"
     },

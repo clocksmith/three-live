@@ -1182,7 +1182,10 @@ export function prepareSceneEdit(
       delete node.scale;
     }
     if (options.preserveTargetName === false && roots.length === 1) {
-      node.name = r.nodes[roots[0]].name;
+      const nextName = r.nodes[roots[0]].name;
+      if (nextName === undefined) delete node.name;
+      else node.name = nextName;
+      delete g.nodes[node.children[0]].name;
     }
   }
 
@@ -1282,12 +1285,54 @@ export function prepareSceneEdit(
   return {model: base, constraints: checks};
 }
 
+async function fetchBoundedBytes(
+  url: string,
+  signal: AbortSignal,
+): Promise<Uint8Array> {
+  const res = await fetch(url, {signal});
+  if (!res.ok) fail(`HTTP ${res.status}`);
+  const cl = Number(res.headers?.get?.('content-length'));
+  if (Number.isFinite(cl) && cl > MAX_BYTES) {
+    await res.body?.cancel?.().catch(() => {});
+    fail('Edit document exceeds storage limit');
+  }
+  const reader = res.body?.getReader?.();
+  if (reader) {
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+      while (true) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        if (value?.byteLength) {
+          total += value.byteLength;
+          if (total > MAX_BYTES) fail('Edit document exceeds storage limit');
+          chunks.push(value);
+        }
+      }
+    } catch (err) {
+      await reader.cancel().catch(() => {});
+      throw err;
+    }
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) {
+      out.set(c, off);
+      off += c.byteLength;
+    }
+    return out;
+  }
+  const buf = new Uint8Array(await res.arrayBuffer());
+  if (buf.byteLength > MAX_BYTES) fail('Edit document exceeds storage limit');
+  return buf;
+}
+
 export class SceneEditor {
   previewEdit!: (options: SceneEditOptions) => Promise<SceneEditReceipt>;
   acceptEdit!: () => SceneEditReceipt;
   rejectEdit!: () => Promise<SceneEditReceipt>;
   undoEdit!: () => Promise<SceneEditReceipt>;
-  dispose!: () => Promise<void>;
+  dispose!: (options?: {restorePreview?: boolean}) => Promise<void>;
 
   constructor(host: SceneEditHost, maxUndoSteps = 8) {
     if (
@@ -1298,46 +1343,49 @@ export class SceneEditor {
       fail('Undo limit must be 0–16');
     }
     let gen = 0;
-    let depth = 0;
     let loads = 0;
+    let inflightAbort: AbortController | null = null;
     let active: {
       before: GLBData;
       after: GLBData;
       receipt: SceneEditReceipt;
     } | null = null;
     let undo: GLBData[] = [];
+    const abortInflight = () => {
+      inflightAbort?.abort();
+      inflightAbort = null;
+    };
+    const rawLoadModel = host.loadModel;
     const h = host as Record<string, unknown>;
-    const saved: Array<[string, unknown]> = [];
+    const saved: Array<[string, unknown, boolean]> = [];
     for (const m of ['loadModel', 'executeScript', 'loadScriptFromSrc']) {
       const fn = h[m];
       if (typeof fn !== 'function') continue;
-      saved.push([m, fn]);
+      saved.push([m, fn, Object.prototype.hasOwnProperty.call(h, m)]);
       h[m] = (...args: unknown[]) => {
-        if (!depth) loads++;
+        loads++;
+        abortInflight();
         return (fn as (...a: unknown[]) => unknown).apply(host, args);
       };
     }
     let unhook: (() => void) | null = () => {
-      for (const [m, fn] of saved) h[m] = fn;
+      for (const [m, fn, own] of saved) {
+        if (own) h[m] = fn;
+        else delete h[m];
+      }
     };
     const curRev = () => (host.sceneRevision ?? 0) + loads;
     let installed = host.getLoadedModel();
     let rev = curRev();
 
-    const apply = async (model: GLBData) => {
-      depth++;
-      try {
-        await host.loadModel(model);
-      } finally {
-        depth--;
-      }
-    };
+    const apply = (model: GLBData) => rawLoadModel.call(host, model);
 
     const sync = () => {
       const cur = host.getLoadedModel();
       const r = curRev();
       if (installed !== cur || rev !== r) {
         gen++;
+        abortInflight();
         active = null;
         undo = [];
         installed = cur;
@@ -1366,6 +1414,7 @@ export class SceneEditor {
       commit: () => void,
     ): Promise<SceneEditReceipt> => {
       gen++;
+      abortInflight();
       const startRev = curRev();
       try {
         await apply(prev);
@@ -1388,9 +1437,11 @@ export class SceneEditor {
         const rej = await this.rejectEdit();
         if (rej.errors.length) return rej;
       }
+      abortInflight();
       const token = ++gen;
       const startRev = curRev();
       const source = host.getLoadedModel();
+      let fetchAc: AbortController | null = null;
       try {
         const input = await options.replacement;
         let rep: GLBData;
@@ -1404,9 +1455,16 @@ export class SceneEditor {
               "Capability 'remote_content' or 'network' denied for replacement URL.",
             );
           }
-          const res = await fetch(input);
-          if (!res.ok) fail(`HTTP ${res.status}`);
-          rep = snapshot(await res.arrayBuffer());
+          if (
+            token !== gen ||
+            startRev !== curRev() ||
+            source !== host.getLoadedModel()
+          ) {
+            fail('Edit was superseded');
+          }
+          fetchAc = new AbortController();
+          inflightAbort = fetchAc;
+          rep = snapshot(await fetchBoundedBytes(input, fetchAc.signal));
         } else {
           rep = snapshot(input);
         }
@@ -1447,6 +1505,8 @@ export class SceneEditor {
       } catch (err) {
         if (token === gen && source === host.getLoadedModel()) rev = curRev();
         return receipt('rejected', [String(err)]);
+      } finally {
+        if (fetchAc && inflightAbort === fetchAc) inflightAbort = null;
       }
     };
 
@@ -1474,6 +1534,7 @@ export class SceneEditor {
       sync();
       if (!active) {
         gen++;
+        abortInflight();
         return receipt('rejected', ['No active preview']);
       }
       return restore(active.before, 'rejected', () => {
@@ -1494,14 +1555,16 @@ export class SceneEditor {
       });
     };
 
-    this.dispose = async () => {
+    this.dispose = async (options) => {
+      abortInflight();
       try {
-        if (active) {
+        if (options?.restorePreview !== false && active) {
           const rej = await this.rejectEdit();
           if (rej.errors.length) fail(rej.errors.join('; '));
         }
       } finally {
         gen++;
+        active = null;
         undo = [];
         unhook?.();
         unhook = null;
@@ -1560,7 +1623,7 @@ export const sceneEditsPlugin: ThreeLivePlugin = {
     const editor = elementEditors.get(host);
     if (editor) {
       elementEditors.delete(host);
-      editor.dispose().catch(() => {});
+      editor.dispose({restorePreview: false}).catch(() => {});
     }
   },
 };

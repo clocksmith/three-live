@@ -13,6 +13,10 @@
 // limitations under the License.
 
 import assert from 'node:assert/strict';
+import {execFileSync} from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   computeSubtreeBounds,
   computeSubtreeBoundsSize,
@@ -748,6 +752,310 @@ async function runTests() {
     idxAcc.componentType = 5121;
     idxAcc.count = 12;
     assert.deepEqual(computeSubtreeBounds(u8Doc, [0]).size, [1, 1, 1]);
+  }
+
+  // 13. Chained edits with preserveTargetName: false clear duplicate child name
+  {
+    let curChain = buildTowerScene('Tower', [1, 2, 1], 0xef4444);
+    const obelisk = buildTowerScene('Obelisk', [1, 2, 1], 0x3b82f6);
+    const spire = buildTowerScene('Spire', [1, 2, 1], 0x10b981);
+    const chainEditor = new SceneEditor({
+      getLoadedModel: () => curChain,
+      loadModel: async (m) => {
+        curChain = m;
+      },
+    });
+    const r1 = await chainEditor.previewEdit({
+      target: 'Tower',
+      replacement: obelisk,
+      preserveTargetName: false,
+    });
+    assert.equal(r1.status, 'preview');
+    assert.equal(
+      curChain.gltf.nodes.filter((n: any) => n.name === 'Obelisk').length,
+      1,
+      'preserveTargetName: false must not leave a duplicate child name',
+    );
+    assert.equal(chainEditor.acceptEdit().status, 'accepted');
+
+    const r2 = await chainEditor.previewEdit({
+      target: 'Obelisk',
+      replacement: spire,
+      preserveTargetName: false,
+    });
+    assert.equal(r2.status, 'preview');
+    assert.equal(
+      curChain.gltf.nodes.filter((n: any) => n.name === 'Spire').length,
+      1,
+    );
+  }
+
+  // 14. Prototype unhooking & concurrent external loadModel mid-apply supersession
+  {
+    const initialModel = buildTowerScene('Tower', [1, 2, 1], 0xef4444);
+    const candidateModel = buildTowerScene('Tower', [1, 2, 1], 0x3b82f6);
+    const externalModel = buildTowerScene('External', [2, 2, 2], 0x10b981);
+
+    class ProtoElement {
+      current = initialModel;
+      onMidApply: (() => Promise<void>) | null = null;
+      getLoadedModel() {
+        return this.current;
+      }
+      async loadModel(m: any) {
+        this.current = m;
+        if (this.onMidApply) {
+          const cb = this.onMidApply;
+          this.onMidApply = null;
+          await cb();
+        }
+      }
+      executeScript(_code: string) {}
+    }
+
+    const protoEl = new ProtoElement();
+    assert.equal(Object.prototype.hasOwnProperty.call(protoEl, 'loadModel'), false);
+    const protoEditor = new SceneEditor(protoEl);
+    assert.equal(Object.prototype.hasOwnProperty.call(protoEl, 'loadModel'), true);
+
+    // Trigger an external host.loadModel() mid-await while apply() is running!
+    protoEl.onMidApply = async () => {
+      await protoEl.loadModel(externalModel);
+    };
+    const midRace = await protoEditor.previewEdit({
+      target: 'Tower',
+      replacement: candidateModel,
+    });
+    assert.equal(midRace.status, 'rejected');
+    assert.equal(midRace.applied, false);
+    assert.equal(protoEl.current, externalModel);
+
+    await protoEditor.dispose();
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(protoEl, 'loadModel'),
+      false,
+      'dispose() deletes wrapper so inherited prototype method is exposed again',
+    );
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(protoEl, 'executeScript'),
+      false,
+    );
+  }
+
+  // 15. Remote fetch AbortController + streaming MAX_BYTES cap, and disconnect without GPU reload
+  {
+    const prevFetch = globalThis.fetch;
+    try {
+      // 15a. AbortController aborts in-flight fetch on supersession
+      let capturedSignal: AbortSignal | undefined;
+      globalThis.fetch = ((_url: unknown, init?: RequestInit) => {
+        capturedSignal = init?.signal ?? undefined;
+        return new Promise<Response>((_resolve, reject) => {
+          capturedSignal?.addEventListener('abort', () => {
+            reject(new DOMException('Aborted', 'AbortError'));
+          });
+        });
+      }) as typeof fetch;
+
+      let remoteCur = buildTowerScene('Tower', [1, 2, 1], 0xef4444);
+      const remoteHost = {
+        capabilities: 'all',
+        getLoadedModel: () => remoteCur,
+        loadModel: async (m: any) => {
+          remoteCur = m;
+        },
+        checkCapability: () => true,
+      };
+      const abortEditor = new SceneEditor(remoteHost);
+      const pendingFetch = abortEditor.previewEdit({
+        target: 'Tower',
+        replacement: 'https://example.com/model.glb',
+      });
+      await Promise.resolve();
+      assert.ok(capturedSignal instanceof AbortSignal);
+      assert.equal(capturedSignal!.aborted, false);
+      await remoteHost.loadModel(buildTowerScene('Other', [1, 1, 1], 0x22c55e));
+      assert.equal(
+        capturedSignal!.aborted,
+        true,
+        'External loadModel immediately aborts in-flight remote fetch',
+      );
+      const abortedRc = await pendingFetch;
+      assert.equal(abortedRc.status, 'rejected');
+
+      // 15b. Streaming response > MAX_BYTES cancels stream early without buffering unbounded bytes
+      let streamCancelled = false;
+      let pulls = 0;
+      globalThis.fetch = (async () => {
+        const body = new ReadableStream<Uint8Array>({
+          pull(controller) {
+            pulls++;
+            // Two 40 MiB chunks exceed MAX_BYTES (64 MiB) on the second chunk
+            controller.enqueue(new Uint8Array(40 * 1024 * 1024));
+          },
+          cancel() {
+            streamCancelled = true;
+          },
+        });
+        return new Response(body, {status: 200});
+      }) as typeof fetch;
+
+      const overStreamRc = await abortEditor.previewEdit({
+        target: 'Other',
+        replacement: 'https://example.com/huge-stream.glb',
+      });
+      assert.equal(overStreamRc.status, 'rejected');
+      assert.ok(
+        overStreamRc.errors[0]?.includes('storage limit'),
+        `Expected storage limit error, got ${JSON.stringify(overStreamRc.errors)}`,
+      );
+      assert.ok(
+        pulls <= 3,
+        `Stream must stop reading as soon as MAX_BYTES is exceeded (got ${pulls} pulls on infinite stream)`,
+      );
+      assert.equal(streamCancelled, true, 'Reader cancel() must be invoked on oversized stream');
+
+      // 15c. Content-Length > MAX_BYTES cancels body and rejects before reading stream
+      let bodyRead = false;
+      let bodyCancelled = false;
+      globalThis.fetch = (async () =>
+        ({
+          ok: true,
+          status: 200,
+          headers: new Headers({'content-length': String(65 * 1024 * 1024)}),
+          body: {
+            cancel: async () => {
+              bodyCancelled = true;
+            },
+            getReader: () => {
+              bodyRead = true;
+              throw new Error('should not read body');
+            },
+          },
+          arrayBuffer: async () => {
+            bodyRead = true;
+            return new ArrayBuffer(0);
+          },
+        }) as unknown as Response) as typeof fetch;
+      const clRc = await abortEditor.previewEdit({
+        target: 'Other',
+        replacement: 'https://example.com/huge-cl.glb',
+      });
+      assert.equal(clRc.status, 'rejected');
+      assert.equal(bodyRead, false);
+      assert.equal(bodyCancelled, true);
+    } finally {
+      globalThis.fetch = prevFetch;
+    }
+
+    // 15d. onElementDisconnected does NOT trigger loadModel GPU upload on teardown
+    let disconnectLoads = 0;
+    let discCur = buildTowerScene('Tower', [1, 2, 1], 0xef4444);
+    class DisconnectingElement {
+      getLoadedModel() {
+        return discCur;
+      }
+      async loadModel(m: any) {
+        disconnectLoads++;
+        discCur = m;
+      }
+    }
+    const discEl = new DisconnectingElement() as SceneEditableElement;
+    sceneEditsPlugin.onElementConnected?.(discEl);
+    const pRc = await discEl.previewNodeEdit!({
+      target: 'Tower',
+      replacement: buildTowerScene('Tower', [1, 2, 1], 0x3b82f6),
+    });
+    assert.equal(pRc.status, 'preview');
+    assert.equal(disconnectLoads, 1);
+    sceneEditsPlugin.onElementDisconnected?.(discEl);
+    await Promise.resolve();
+    assert.equal(
+      disconnectLoads,
+      1,
+      'onElementDisconnected must not reload active.before onto a tearing-down element',
+    );
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(discEl, 'loadModel'),
+      false,
+    );
+  }
+
+  // 16. Package exports & standalone TypeScript declaration check (`three-live/edits`)
+  {
+    const rootCandidates = [
+      process.cwd(),
+      path.resolve(__dirname, '../..'),
+      path.resolve(__dirname, '../../..'),
+    ];
+    const repoRoot = rootCandidates.find((p) =>
+      fs.existsSync(path.join(p, 'three-live/package.json')),
+    );
+    assert.ok(repoRoot, 'Located monorepo root');
+    const rootPkg = JSON.parse(
+      fs.readFileSync(path.join(repoRoot!, 'package.json'), 'utf8'),
+    );
+    const tlPkg = JSON.parse(
+      fs.readFileSync(path.join(repoRoot!, 'three-live/package.json'), 'utf8'),
+    );
+    const rootTypesPath = path.join(repoRoot!, rootPkg.exports['./edits'].types);
+    const tlTypesPath = path.join(
+      repoRoot!,
+      'three-live',
+      tlPkg.exports['./edits'].types,
+    );
+    assert.equal(rootTypesPath, tlTypesPath);
+    if (fs.existsSync(tlTypesPath)) {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tl-edits-dts-'));
+      try {
+        // Copy ONLY the standalone .d.ts into an isolated temp directory (simulating npm pack!)
+        fs.copyFileSync(tlTypesPath, path.join(tmpDir, 'three-live-edits.d.ts'));
+        const consumerPath = path.join(tmpDir, 'consumer.ts');
+        fs.writeFileSync(
+          consumerPath,
+          [
+            'import {',
+            '  SceneEditor,',
+            '  sceneEditsPlugin,',
+            '  prepareSceneEdit,',
+            '  computeSubtreeBounds,',
+            '  computeSubtreeBoundsSize,',
+            '  type SceneEditOptions,',
+            '  type SceneEditReceipt,',
+            '  type SceneEditConstraints,',
+            '  type SceneEditHost,',
+            '  type SceneEditableElement,',
+            '  type SceneEditPayload,',
+            '  type SubtreeBounds,',
+            "} from './three-live-edits';",
+            'export type Check = [SceneEditor, typeof sceneEditsPlugin, typeof prepareSceneEdit, typeof computeSubtreeBounds, typeof computeSubtreeBoundsSize, SceneEditOptions, SceneEditReceipt, SceneEditConstraints, SceneEditHost, SceneEditableElement, SceneEditPayload, SubtreeBounds];',
+          ].join('\n'),
+        );
+        const tscBin = [
+          path.join(repoRoot!, 'node_modules/typescript/bin/tsc'),
+          path.join(repoRoot!, 'three-live/node_modules/typescript/bin/tsc'),
+        ].find((p) => fs.existsSync(p));
+        assert.ok(tscBin, 'Located tsc binary');
+        execFileSync(
+          process.execPath,
+          [
+            tscBin!,
+            '--noEmit',
+            '--strict',
+            '--target',
+            'es2020',
+            '--module',
+            'esnext',
+            '--moduleResolution',
+            'bundler',
+            consumerPath,
+          ],
+          {stdio: 'pipe'},
+        );
+      } finally {
+        fs.rmSync(tmpDir, {recursive: true, force: true});
+      }
+    }
   }
 
   sceneEditsPlugin.onElementDisconnected?.(host);

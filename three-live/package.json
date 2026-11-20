@@ -156,7 +156,7 @@
       "require": "./dist/three-live-tsl.cjs"
     },
     "./edits": {
-      "types": "./dist/edits.d.ts",
+      "types": "./dist/three-live-edits.d.ts",
       "import": "./dist/three-live-edits.js",
       "require": "./dist/three-live-edits.cjs"
     },
