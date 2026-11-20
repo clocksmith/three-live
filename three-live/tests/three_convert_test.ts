@@ -22,6 +22,7 @@ import THREE, {
   DirectionalLight,
   Float32BufferAttribute,
   Group,
+  InstancedMesh,
   Mesh,
   MeshStandardMaterial,
   Scene,
@@ -979,6 +980,38 @@ async function runTests() {
     assert(
       !allHiddenGltf.meshes && !allHiddenGltf.accessors,
       'Multi-material BoxGeometry with all 6 faces {visible: false} omits mesh and accessors',
+    );
+
+    const instMulti = new InstancedMesh(
+      new CylinderGeometry(1, 1, 2, 16),
+      [
+        new MeshStandardMaterial({color: 0xff0000}),
+        new MeshStandardMaterial({color: 0x00ff00}),
+        new MeshStandardMaterial({color: 0x0000ff}),
+      ],
+      3,
+    );
+    const instMultiScene = new Scene();
+    instMultiScene.add(instMulti);
+    const instMultiGltf = sceneToCanvas3D(instMultiScene).gltf;
+    assert(
+      instMultiGltf.meshes[0].primitives.length === 3 &&
+        Boolean(instMultiGltf.nodes[0].extensions?.EXT_mesh_gpu_instancing),
+      'InstancedMesh accepts Material[] and exports 3 primitives with EXT_mesh_gpu_instancing',
+    );
+
+    const instHidden = new InstancedMesh(
+      new BoxGeometry(1, 1, 1),
+      Array.from({length: 6}, () => new MeshStandardMaterial({visible: false})),
+      2,
+    );
+    const instHiddenScene = new Scene();
+    instHiddenScene.add(instHidden);
+    const instHiddenGltf = sceneToCanvas3D(instHiddenScene).gltf;
+    assert(
+      !instHiddenGltf.meshes &&
+        !instHiddenGltf.nodes[0].extensions?.EXT_mesh_gpu_instancing,
+      'Hidden InstancedMesh omits both mesh and EXT_mesh_gpu_instancing',
     );
   }
 

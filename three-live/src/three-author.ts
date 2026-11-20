@@ -1533,7 +1533,7 @@ export class CylinderGeometry extends BufferGeometry {
         );
         setCylinderMaterialGroups(
           this,
-          radialSegments,
+          Math.min(radialSegments, 2048),
           heightSegments,
           openEnded,
           radiusTop,
@@ -2705,7 +2705,11 @@ export class InstancedMesh extends Mesh {
   instanceColor: BufferAttribute | null = null;
   isInstancedMesh = true;
 
-  constructor(geometry?: BufferGeometry, material?: Material, count = 1) {
+  constructor(
+    geometry?: BufferGeometry,
+    material?: Material | Material[],
+    count = 1,
+  ) {
     super(geometry, material);
     const n = Number(count);
     if (!Number.isFinite(n) || n < 0 || n > MAX_INSTANCES_PER_MESH) {

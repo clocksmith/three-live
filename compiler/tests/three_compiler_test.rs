@@ -6215,4 +6215,27 @@ fn test_material_visibility_constructor_and_single_vs_multi_parity() {
     assert_eq!(glb_partial.meshes[0].groups.len(), 4);
     assert_eq!(glb_partial.meshes[0].indices.len(), 24);
     assert_eq!(glb_partial.materials.len(), 4);
+
+    // 3. Native CylinderGeometry clamps radialSegments to 2048 for material groups too
+    let cyl_clamp_script = r#"
+        const cyl = new THREE.Mesh(
+            new THREE.CylinderGeometry(1, 1, 2, 4096),
+            [
+                new THREE.MeshStandardMaterial({ color: 0xff0000 }),
+                new THREE.MeshStandardMaterial({ color: 0x00ff00 }),
+                new THREE.MeshStandardMaterial({ color: 0x0000ff }),
+            ],
+        );
+        scene.add(cyl);
+    "#;
+    let raw_cyl = engine.execute(cyl_clamp_script).expect("execute clamped cylinder");
+    assert_eq!(raw_cyl.meshes.len(), 1);
+    assert_eq!(raw_cyl.meshes[0].indices.len(), 2048 * 12);
+    assert_eq!(raw_cyl.meshes[0].groups.len(), 3);
+    assert_eq!(raw_cyl.meshes[0].groups[0].start, 0);
+    assert_eq!(raw_cyl.meshes[0].groups[0].count, 2048 * 6);
+    assert_eq!(raw_cyl.meshes[0].groups[1].start, 2048 * 6);
+    assert_eq!(raw_cyl.meshes[0].groups[1].count, 2048 * 3);
+    assert_eq!(raw_cyl.meshes[0].groups[2].start, 2048 * 9);
+    assert_eq!(raw_cyl.meshes[0].groups[2].count, 2048 * 3);
 }
